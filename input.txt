@@ -1,0 +1,12 @@
+Line 1: Number of output particles for gsim
+      (2: electron and charged hadron)
+      (4: electron, charged and neutral hadron, photon)
+line 2:( 1 for pi-zero, 3 for pi-plus)
+line 3:( thickness of target, radiation lengths)
+line 4:( beam energy, GeV)
+line 5:( minimum and maximum Q2 GeV)
+line 6:( minimum and maximum energy for scattered electron)
+line 7:( photon energy lower cut-off, GeV)
+line 8:( Number of output events)
+line 9:( factor to adjust the maximum cross section, used in M.C. 
+         selection)
