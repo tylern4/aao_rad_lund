@@ -2,7 +2,7 @@
 FC = gfortran
 
 # compile flags
-FCFLAGS = -g -ffixed-line-length-0 -std=legacy
+FCFLAGS = -g -Ofast -ffixed-line-length-0 -std=legacy
 # link flags
 FLFLAGS =
 
@@ -15,6 +15,8 @@ PROGRAM = aao_rad
 all: $(PROGRAM)
 
 $(PROGRAM): $(SRCS)
+	gcc -g -Ofast -c unixtime.c
+	gcc -g -Ofast -c lenocc.c
 	$(FC) $(FLFLAGS) -o $(PROGRAM) $(SRCS) unixtime.o lenocc.o
 
 %.o: %.F

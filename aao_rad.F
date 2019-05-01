@@ -116,7 +116,6 @@ c     and make a new version.
       real tk_max
       real tp
       real tries
-      real itime1, itime2
       real ts
       real uek
       real uq2, uq2_min,uq2_max,uq2rng
@@ -164,10 +163,8 @@ c     character*1 ich1
       character*2 day
       character*2 year
       character*5 tag(n)
-      character*13 filerz
       character*13 file_out
       character*13 file_sum
-      character*13 file_bos
       character*8 recname
       character*28  ctime
 
@@ -185,10 +182,8 @@ c     character*1 ich1
       DATA MP   /.938/
       DATA MEL  /.511E-3/
 
-      data filerz   /'aao_rad.rz'/
-      data file_out /'aao_rad.out'/
+      data file_out /'aao_rad.lund'/
       data file_sum /'aao_rad.sum'/
-      data file_bos /'aao_rad.evt'/
       data ctime    /'                            '/
 
       do j=1,6
@@ -281,8 +276,6 @@ c     Choose whether a neutral or charged pion is made in the reaction
          go to 5
       endif
 
-      if (epirea .eq. 3)filerz(13:13)='p'
-
 c     Set single precision version of pion mass
       mpi_s=mpi
 
@@ -365,8 +358,6 @@ c     Select the number of events desired in the rz file
 
 c     Use the internal clock to initialize the random number generator
 
-c      call timex(itime1)
-      call getunixtime(itime1)
       call getunixtime(idum)
       call getasciitime(idum,ctime)
 
@@ -384,8 +375,6 @@ c      call timex(itime1)
       cstk	= myran(idum)
 
       nevent	= 0
-      t_elapse	= 0.
-      itime2	= itime1
       ntries	= 0
       sig_int	= 0.
       sig_tot	= 0.
@@ -398,22 +387,16 @@ c     filerz=aaoradgen-pi0-1.6-0811.rz.0, for example.
 c     set up the ntuple file
 
       lrecl	= 1024
-
-c      call hlimit(5000000)
-c      call hropen(1,'aaoradgen',filerz,'n',lrecl,istat)
-
       open(unit=12,file=file_out)
+c      write(12,*)' AO Calculation of Single Pion Production'
+c      write(12,*)' Starting time:', ctime
+c      write(12,*)' Epirea (1 for pi0, 3 for pi+) =',epirea
+c      write(12,*)' Target thickness =',t_targ*3./4.,' (r.l.)'
+c      write(12,*)' Incident electron energy =',ebeam,' GeV'
 
-      write(12,*)' AO Calculation of Single Pion Production'
-      write(12,*)' Starting time:', ctime
-      write(12,*)' Epirea (1 for pi0, 3 for pi+) =',epirea
-      write(12,*)' Target thickness =',t_targ*3./4.,' (r.l.)'
-      write(12,*)' Incident electron energy =',ebeam,' GeV'
-
-      write(12,*)' Electron Q**2 limits:',q2_min,q2_max
-      write(12,*)' Lower and upper limit for scattered electron',
-     * ' energy(GeV):',ep_min,epmax
-      write(12,*)' Minimum photon energy for integration (delta):',delta
+c      write(12,*)' Electron Q**2 limits:',q2_min,q2_max
+c      write(12,*)' Lower and upper limit for scattered electron', * ' energy(GeV):',ep_min,epmax
+c      write(12,*)' Minimum photon energy for integration (delta):',delta
 
 c     Use a new variable in place of ek. Let uek=exp(-kek*ek)
 c     ek=-(1/kexp)alog(uek).  The factor of 5. was chosen empirically for kexp
@@ -425,7 +408,7 @@ c     This requires a jacobian. Jacobian=1./(kexp*uek)=(1./kexp)exp(kexp*ek)
 
       if (fmcall .eq. 0.)then
          write(6,*)' sigr_max from input data =',sigr_max
-         write(12,*)' sigr_max from input data =',sigr_max
+c         write(12,*)' sigr_max from input data =',sigr_max
          go to 20
       endif
 
@@ -520,13 +503,10 @@ c
 
       write(6,*)'sigr_max,ek_max,tk_max,csthcm_max,phicm_max',
      * sigr_max,ek_max,tk_max,csthcm_max,phicm_max
-      write(12,*)'sigr_max,ek_max,tk_max,csthcm_max,phicm_max',
-     * sigr_max,ek_max,tk_max,csthcm_max,phicm_max
 
       sigr_max	= sigr_max*fmcall
 
  25   write(6,*) ' sigr_max changed to ',sigr_max
-      write(12,*)' sigr_max changed to ',sigr_max
 
 c   %%%%%%%%%%%%%%%%%%% Main Calculation  %%%%%%%%%%%%%%%%%%%%%%%
 c     Use a Monte-Carlo to calculate a distribution of nmax events
@@ -949,12 +929,6 @@ c     to calculate kinematic quantities for the n-tuple.
          write(6,*)'cstk,phik,csdotk,cpdotk'
      +   ,cstk,phik,csdotk,cpdotk
          write(6,*)'cqdotk',cqdotk
-
-         write(12,*)' mcall =',mcall,' intreg=',intreg
-         write(12,*)'es,ep,ek',es,ep,ek
-         write(12,*)'cstk,phik,csdotk,cpdotk'
-     +   ,cstk,phik,csdotk,cpdotk
-         write(12,*)'cqdotk',cqdotk
       endif
 
 c     If mcall .gt. 0 generate mcall n-tuple events
@@ -1035,7 +1009,6 @@ c     Calculate the members of the n-tuple and ouput it to the rz file.
          ntp(31)= ehel
          ntp(32)= asym_p
 
-c         call hfn(10,ntp)
          nevent	= nevent+1
 
          do jj = 1,npart
@@ -1112,6 +1085,20 @@ c     suppress radiated photons when E-gamma is less than delta
              p(4,4) = ek
              endif
          endif
+c        This should be Electron px,py,p
+         write(12,*)'px,py,pz,E'
+         write(12,*) p(1,1),p(1,2),p(1,3),p(1,4)
+         write(12,*)'x,y,z'
+         write(12,*) v(1,1),v(1,2),v(1,3)
+c        This should be pion px,py,pz,E
+         write(12,*) p(2,1),p(2,2),p(2,3),p(2,4)
+         write(12,*) v(2,1),v(2,2),v(2,3)
+c        This should be ? px,py,pz,E
+         if (npart .eq. 4)then
+           write(12,*) p(3,1),p(3,2),p(3,3),p(3,4)
+c          This should be photon px,py,pz,E
+           write(12,*) p(4,1),p(4,2),p(4,3),p(4,4)
+         endif
 
 c         call bos_out	! Pack the BOS banks and write out to file
 
@@ -1125,8 +1112,7 @@ c     Talk to the user every now and then
        if (ntell .gt. 0)then
           write(6,*)' ntries, nevent, mcall_max: '
      *    ,ntries,nevent,mcall_max
-          write(12,*)' ntries, nevent, mcall_max: '
-     *    ,ntries,nevent,mcall_max
+c          write(12,*)' ntries, nevent, mcall_max: '*    ,ntries,nevent,mcall_max
 
          events	= nevent
          tries	= ntries
@@ -1143,19 +1129,6 @@ c     electron phase space =2*pi*ucrng*eprng
      +   ,sig_int,sig_sum, ' mu-barns'
          write(6,*)' Beam time at Lum=1.0E34 =',events/sig_sum*1.E-4
      *    ,' seconds'
-         write(12,*)' Integrated cross section =',sig_int,sig_sum
-     *    ,' micro-barns'
-         write(12,*)' Beam time at Lum=1.0E34 =',events/sig_sum*1.E-4
-     *    ,' seconds'
-
-          call getunixtime(itime2)
-
-          t_elapse	= t_elapse+INT(itime2-itime1)
-          itime1	= itime2
-
-          write(6,*)' Elapsed CPU time = ',t_elapse/60,' minutes'
-          write(12,*)' Elapsed CPU time = ',t_elapse/60,' minutes'
-
           ntold	= ntold+1
 
        endif
@@ -1168,7 +1141,7 @@ c     Do we have enough events in the n-tuple?
 
 c     Close out the n-tuple file
 
-50    print *, 'Write to lund here'
+50     CLOSE(12, STATUS='KEEP')
 c      call hrout(0,icycle,' ')
 c      call hrend('aaoradgen')
 
@@ -1196,7 +1169,7 @@ c      call hrend('aaoradgen')
      *    ,' micro-barns'
       write(14,*)' Beam time at Lum=1.0E34 =',events/sig_sum*1.E-4
      *    ,' seconds'
-      write(14,*)' Elapsed CPU time = ',t_elapse/60,' minutes'
+c      write(14,*)' Elapsed CPU time = ',t_elapse/60,' minutes'
       write(14,*)' CPU time/event = ', t_elapse/nevent,' sec'
 
       write(14,1425)reg1,reg2-reg1,reg3-reg2, reg4-reg3,1.-reg4
