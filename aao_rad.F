@@ -408,7 +408,6 @@ c     This requires a jacobian. Jacobian=1./(kexp*uek)=(1./kexp)exp(kexp*ek)
 
       if (fmcall .eq. 0.)then
          write(6,*)' sigr_max from input data =',sigr_max
-c         write(12,*)' sigr_max from input data =',sigr_max
          go to 20
       endif
 
@@ -1085,19 +1084,20 @@ c     suppress radiated photons when E-gamma is less than delta
              p(4,4) = ek
              endif
          endif
-c        This should be Electron px,py,p
-         write(12,*)'px,py,pz,E'
-         write(12,*) p(1,1),p(1,2),p(1,3),p(1,4)
-         write(12,*)'x,y,z'
-         write(12,*) v(1,1),v(1,2),v(1,3)
-c        This should be pion px,py,pz,E
-         write(12,*) p(2,1),p(2,2),p(2,3),p(2,4)
-         write(12,*) v(2,1),v(2,2),v(2,3)
+c        This should be Headers
+         write(12,*) npart,1,1,1,flag_ehel,11,ebeam,1,1,0.0
+c        This should be Electron
+         write(12,*) 1,0.0,1,11,0,0,p(1,1),p(1,2),p(1,3),p(1,4),5.11E-4,v(1,1),v(1,2),v(1,3)
+c        This should be pion
+         write(12,*) 2,0.0,1,pdgid(2),0,0,p(2,1),p(2,2),p(2,3),p(2,4),pdgid(2),v(2,1),v(2,2),v(2,3)
 c        This should be ? px,py,pz,E
          if (npart .eq. 4)then
-           write(12,*) p(3,1),p(3,2),p(3,3),p(3,4)
+c          TODO: Do the same for other particles present
+c           write(12,*) 2,0.0,1,211,0,0
+c           write(12,*) p(2,1),p(2,2),p(2,3),p(2,4),5.11E-4,v(2,1),v(2,2),v(2,3)
+c           write(12,*) p(3,1),p(3,2),p(3,3),p(3,4)
 c          This should be photon px,py,pz,E
-           write(12,*) p(4,1),p(4,2),p(4,3),p(4,4)
+c           write(12,*) p(4,1),p(4,2),p(4,3),p(4,4)
          endif
 
 c         call bos_out	! Pack the BOS banks and write out to file
