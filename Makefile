@@ -1,26 +1,36 @@
 # compiler
-FC = gfortran
+FC = gfortran-7
+CC = gcc-7
 
 # compile flags
 FCFLAGS = -g -Ofast -ffixed-line-length-0 -std=legacy
-# link flags
-FLFLAGS =
+CFLAGS = -g -Ofast -Wno-pointer-to-int-cast
+
+SRC_DIR = src
+OBJ_DIR = lib
 
 # source files and objects
-SRCS = $(patsubst %.F, %.o, $(wildcard *.F))
+FSRCS = $(wildcard $(SRC_DIR)/*.F)
+CSRCS = $(wildcard $(SRC_DIR)/*.c)
+
+FOBJ = $(FSRCS:$(SRC_DIR)/%.F=$(OBJ_DIR)/%.o)
+COBJ = $(CSRCS:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 
 # program name
 PROGRAM = aao_rad
 
-all: $(PROGRAM)
+#.PHONY all clean
 
-$(PROGRAM): $(SRCS)
-	gcc -g -Ofast -c unixtime.c
-	gcc -g -Ofast -c lenocc.c
-	$(FC) $(FLFLAGS) -o $(PROGRAM) $(SRCS) unixtime.o lenocc.o
+all: $(COBJ) $(FOBJ) $(PROGRAM)
 
-%.o: %.F
-	$(FC) $(FCFLAGS) -c $<
+$(PROGRAM): $(FOBJ)
+	$(FC) $(FLFLAGS) -o bin/$@ $(COBJ) $(FOBJ)
+
+$(OBJ_DIR)/%.o: $(SRC_DIR)/%.F
+	$(FC) $(FCFLAGS) -c $< -o $@
+
+$(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
+	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -f *.o *.mod
+	rm -f lib/*.o bin/aao_rad
