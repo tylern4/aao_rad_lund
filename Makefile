@@ -1,6 +1,6 @@
 # compiler
-FC = gfortran-7
-CC = gcc-7
+FC = gfortran
+CC = gcc
 
 # compile flags
 FCFLAGS = -g -Ofast -ffixed-line-length-0 -std=legacy
