@@ -2,14 +2,14 @@
 1                       ! 1 for polarized electron, 0 for unpolarized
 .20 .12 .20 .20         ! the sizes of the integration regions
 3	                      ! npart
-3	                      ! 1: pi0 , 3:pi+
+1	                      ! 1: pi0 , 3:pi+
 .2                      ! a limit on the error in (mm)**2
 5.0                     ! target cell length (cm)
 0.486                   ! radius of target cyclinder
 0.3                     ! x-coord of beam position
 0.03                    ! y-coord of beam position
 0.                      ! z-coord of beam positio
-1.5                 ! beam energy
+4.8                 ! beam energy
 0.9 3.5                  ! Q2_min, Q2_max
 0.1 4.25                ! scattered electron momentum min and max
 .005                    ! minimum photon energy for integration

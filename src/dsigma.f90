@@ -24,7 +24,7 @@ subroutine dsigma(the, q2, w, cscm, phicm, opt1, opt2, opt3&
     test3 = opt1.ge.4.and.(w.lt.1.1.or.w.gt.2.0)
 
     if (test1.or.test3) then
-        !        print *, 'ABORT',ki_mag,kf_mag,q2,w
+        !print *, 'ABORT',ki_mag,kf_mag,q2,w
         sig0 = 0.
         sigu = 0.
         sigt = 0.
@@ -42,5 +42,6 @@ subroutine dsigma(the, q2, w, cscm, phicm, opt1, opt2, opt3&
     if(opt1.eq.4.or.opt1.eq.5)&
             call maid_lee(q2, w, eps, cscm, phicm, opt1, opt2, opt3, &
                     sig0, sigu, sigt, sigl, sigi, sigip, asym_p, ehel)
-    !      print *, 'DSIGMA: ',sig0,sigu,sigl,sigt,sigi,sigip,asym_p,ehel
+
+        !print *, 'DSIGMA: ',sig0,sigu,sigl,sigt,sigi,sigip,asym_p,ehel
 end

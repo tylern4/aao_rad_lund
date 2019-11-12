@@ -1,4 +1,6 @@
-program aaorad_gen
+subroutine aao_rad_wrapper(th_opt_in,flag_ehel,reg1, reg2, reg3, reg4, npart&
+        , epirea_in, mm_cut, t_targ, r_targ, vertex_x,vertex_y, vz, ebeam&
+        , q2_min, q2_max, ep_min, ep_max, delta, nmax, fmcall, sigr_max, file_out)
 
     !     This program makes an n-tuple that can be used with Paw to
     !     make distributions of energies, angles, resonance
@@ -133,7 +135,8 @@ program aaorad_gen
     real p(5,4)
     integer pdgid(100)
 
-    integer epirea, th_opt, res_opt
+    integer epirea_in, th_opt_in
+    integer epirea, res_opt, th_opt
     integer i
     integer ir1
     !      integer iext
@@ -185,7 +188,7 @@ program aaorad_gen
     DATA MP   /.938/
     DATA MEL  /.511E-3/
 
-    data file_out /'aao_rad.lund'/
+    !data file_out /'aao_rad.lund'/
     !data file_sum /'aao_rad.sum'/
     data ctime    /'                            '/
 
@@ -197,24 +200,12 @@ program aaorad_gen
 
     !     set up parameters for breaking the monte-carlo integration region
     !     over csthk into 5 parts:
+    th_opt = th_opt_in
+    epirea = epirea_in
 
     csrng = .04
 
     !      Region sizes suggested for 4 GeV: reg1=.23, reg2=.14, reg3=.11, reg4=.10
-
-    14   print *, 'Enter theory_opt,resonance_opt: (1=AO,4=MAID98,5=MAID2000)'
-    read(5, *) th_opt
-    !
-    print *, th_opt
-
-    print *, 'Enter 1 for polarized electron, 0 for unpolarized electron'
-    read(5, *) flag_ehel
-    !
-    print *, flag_ehel
-    res_opt = 0
-
-    print *, 'Input the sizes of the integration regions'
-    read(5, *)reg1, reg2, reg3, reg4
 
     reg2 = reg1 + reg2
     reg3 = reg2 + reg3
@@ -222,16 +213,12 @@ program aaorad_gen
 
     if (reg4 .gt. .95) then
         write(6, *)' The sum of the region sizes must be less than .95'
-        go to 14
+        call exit(1)
     endif
 
     alpha = 1 / 137.
 
     !     set up parameters for bos bank input to GSIM
-
-    print *, ' Input 2 for two charged particles in the bos bank'
-    print *, ' Input 4 to get the neutral hadron and photon as well'
-    read(5, *)npart
 
     if (npart .ne. 4) npart = 2
 
@@ -246,12 +233,6 @@ program aaorad_gen
     endif
     !
     !     Choose whether a neutral or charged pion is made in the reaction
-
-    5    print *, ' Input epirea (1 for pi0, 3 for pi+)'
-    read(5, *)epirea
-
-    print *, ' Input a limit on the error in (mm)**2'
-    read(5, *)mm_cut
 
     IF(epirea.eq.1)then
         MPI = MPI0
@@ -276,7 +257,7 @@ program aaorad_gen
             q(3) = 0
         endif
     else
-        go to 5
+        call exit(1)
     endif
 
     !     Set single precision version of pion mass
@@ -285,24 +266,10 @@ program aaorad_gen
     !     Calculate the minimum hadronic mass for pion production:
     wg = mp + mpi + .0005
 
-    write(6, *)' Input the target thickness (cm)'
-    read(5, *)t_targ
-    write(6, *)' Input the target radius, (cm)'
-    read(5, *)r_targ
-
-    write(6, *)' Input the x-coordinate of the beam position, (cm)'
-    read(5, *)vertex_x
-    write(6, *)' Input the y-coordinate of the beam position, (cm)'
-    read(5, *)vertex_y
-    write(6, *)' Input the z-coordinate of the beam position, (cm)'
-    read(5, *)vz
 
     bfac = 4. / 3.
     hydrogen_rad = 865        ! hydrogen radiation length (cm)
     t_targ = bfac * t_targ / hydrogen_rad
-
-    write(6, *)' Input the incident electron energy (GeV)'
-    read(5, *)ebeam
 
     !     calculate the incident momentum
 
@@ -317,19 +284,12 @@ program aaorad_gen
 
     !     Choose two limits for Q**2
 
-    write(6, *)'Input lower and upper limit for Q**2'
-    read(5, *)q2_min, q2_max
-
     if (q2_max .gt. q2max) q2_max = q2max
     uq2_min = 1 / q2_max
     uq2_max = 1 / q2_min
     uq2rng = uq2_max - uq2_min
 
     !     Set the limits on the range of scattered electron energies
-
-    write(6, *)'Input lower and upper limit for scat e- energy(GeV).'
-    read(5, *)ep_min, ep_max
-
     epmax = es - (wg**2 + q2_min - mp**2) / 2. / mp
 
     if (ep_max .lt. epmax)epmax = ep_max
@@ -337,23 +297,9 @@ program aaorad_gen
 
     !     Choose a maximum value for the range of photon energies
 
-    write(6, *)' Input minimum photon energy for integration'
-    read(5, *)delta
-
     !     Select the number of events desired in the rz file
 
-    write(6, *)' Input the desired number of events in the ntuple'
-    read(5, *)nmax
-
-    nprint = nmax / 25
-
-    write(6, *)' Input a multiplication factor for sigr_max'
-    read(5, *)fmcall
-
-    if (fmcall .eq. 0.)then
-        write(6, *)' Input sigr_max'
-        read(5, *)sigr_max
-    endif
+    nprint = nmax / 10
 
     1    mcall_max = 0
     ntold = 0
@@ -410,7 +356,6 @@ program aaorad_gen
     kexp = 5.
 
     if (fmcall .eq. 0.)then
-        write(6, *)' sigr_max from input data =', sigr_max
         go to 20
     endif
 
@@ -915,23 +860,6 @@ program aaorad_gen
     if (stest .gt. rtest)mcall = mcall + 1
 
     if (mcall .gt. mcall_max) mcall_max = mcall
-    if (mcall .gt. 10)then
-        write(6, *)' mcall =', mcall, ' intreg=', intreg
-        write(6, *)es, ep, th0, ek
-        write(6, *)'cstk1,cstk2,cstk,phik', cstk1, cstk2, cstk, phik
-        write(6, *)' csrnge=', csrnge
-        write(6, *) ppx, ppy, ppz, eprot, ekx, eky, ekz
-        write(6, *)csthcm, phicm, wreal, mm2
-
-        csdotk = cstk * csths + sntk * snths * cos(phik)
-        cpdotk = cstk * csthp + sntk * snthp * cos(phik)
-        cqdotk = (ps * csdotk - pp * cpdotk) / sqrt(ps**2 + pp**2 - 2 * ps * pp * cos(th0))
-
-        write(6, *)'es,ep,ek', es, ep, ek
-        write(6, *)'cstk,phik,csdotk,cpdotk'&
-                , cstk, phik, csdotk, cpdotk
-        write(6, *)'cqdotk', cqdotk
-    endif
 
     !     If mcall .gt. 0 generate mcall n-tuple events
 
@@ -1112,31 +1040,11 @@ program aaorad_gen
 
     ntell = nevent / nprint - ntold
 
-    if (ntell .gt. 0)then
-        write(6, *)' ntries, nevent, mcall_max: '&
-                , ntries, nevent, mcall_max
-        !          write(12,*)' ntries, nevent, mcall_max: '*    ,ntries,nevent,mcall_max
-
-        events = nevent
-        tries = ntries
-        sig_int = events / tries
-
-        !     photon phase space = 4*pi*delta-omega=4*pi (after change of variables)
-        !     hadron phase space = 4*pi
-        !     electron phase space =2*pi*ucrng*eprng
-
-        sig_int = sig_int * sigr_max * (4. * pi)**2 * (2. * pi * uq2rng * eprng)
-        sig_sum = sig_tot * (4. * pi)**2 * (2. * pi * uq2rng * eprng) / tries
-
-        write(6, *)' Integrated cross section (MC, numerical) ='&
-                , sig_int, sig_sum, ' mu-barns'
-        write(6, *)' Beam time at Lum=1.0E34 =', events / sig_sum * 1.E-4&
-                , ' seconds'
-        ntold = ntold + 1
-
-    endif
-
     !     Do we have enough events in the n-tuple?
+    if (mod(nevent, 100) .eq. 0)then
+        events = nevent
+        write(6, *)' Events: ', events
+    endif
 
     if (nevent .gt. nmax)go to 50
 
@@ -1145,42 +1053,10 @@ program aaorad_gen
     !     Close out the n-tuple file
 
     50     CLOSE(12, STATUS = 'KEEP')
-    !      call hrout(0,icycle,' ')
-    !      call hrend('aaoradgen')
+
 
     close(12)
 
-    !open(unit = 14, file = file_sum)
-
-    !write(14, *)' AO Calculation of Single Pion Production'
-    !write(14, *)' Starting time: ', ctime
-    !write(14, *)' Epirea (1 for pi0, 3 for pi+) =', epirea
-    !write(14, *)'Target thickness =', t_targ * 3. / 4., ' (r.l.)'
-    !write(14, *)' Incident electron energy =', ebeam, ' GeV'
-
-    !write(14, *)'Electron Q**2 limits:', q2_min, q2_max
-    !write(14, *)'lower and upper limit for scattered electron', ' energy(GeV):', ep_min, epmax
-    !write(14, *)' Minimum photon energy for integration (delta):', delta
-    !write(14, *)'sigr_max,ek_max,tk_max,csthcm_max,phicm_max', sigr_max, ek_max, tk_max, csthcm_max, phicm_max
-    !write(14, *)' ntries, nevent, mcall_max: ', ntries, nevent, mcall_max
-    !write(14, *)' Missing-mass squared cut at:', mm_cut
-    !write(14, *)' Integrated cross section =', sig_int, sig_sum, ' micro-barns'
-    !write(14, *)' Beam time at Lum=1.0E34 =', events / sig_sum * 1.E-4, ' seconds'
-    !write(14,*)' Elapsed CPU time = ',t_elapse/60,' minutes'
-    !write(14, *)' CPU time/event = ', t_elapse / nevent, ' sec'
-
-    !write(14, 1425)reg1, reg2 - reg1, reg3 - reg2, reg4 - reg3, 1. - reg4
-    !write(14, *)'csrng =', csrng
-    !1425 format(' size of cosine regions:', 5f5.2)
-    !do intreg = 1, 6
-        !write(14, 1410)intreg, (dismc(intreg, j), j = 1, 100)
-    !enddo
-
-    !1410 format(' Distribution of mcall values, region', i2 /10(1x, 10i7/))
-
-    !close(14)
-
-    !99   continue
 
     stop
 end
@@ -1362,7 +1238,7 @@ real function sigma(ek, Tk, epcos, epphi, ehel)
             + ehel * sqrt(epeps * (1. - epeps) / 2) * sigip * sin(epphi * pi / 180.))&
             / (sigu + epeps * sigl))
 
-    if (sigf .gt. 0.)go to 124
+    if (sigf.gt.0.)go to 124
     write(6, *)' sigma-5: sigf =', sigf
     sigma = 0.1e-30
     return
