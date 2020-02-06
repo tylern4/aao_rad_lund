@@ -32,6 +32,7 @@ add_library(aao_libs
         src/splint.f90
         src/xsection.f90
         src/wrapper_aao_rad.f90
+        src/dvmpw.f90
         )
 
 add_executable(aao_rad src/aao_rad.f90)

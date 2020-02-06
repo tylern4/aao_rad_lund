@@ -186,7 +186,7 @@ subroutine maid_lee(a1, a2, a3, a4, a5, theory_opt, channel_opt, &
         if (channel_opt.eq.1) then
             if (resonance_opt.eq.0) then
                 call revinm('CLAS_PARMS', &
-                        'spp_tbl/maid2000-PPpi.tbl', data_file)
+                           'spp_tbl/maid07-PPpi.tbl',data_file)
             elseif (resonance_opt.eq.1) then
                 call revinm('CLAS_PARMS', &
                         'spp_tbl/maid2000_p33_on-PPpi.tbl', data_file)
@@ -282,7 +282,7 @@ subroutine maid_lee(a1, a2, a3, a4, a5, theory_opt, channel_opt, &
         if (channel_opt.eq.3) then
             if (resonance_opt.eq.0) then
                 call revinm('CLAS_PARMS', &
-                        'spp_tbl/maid2000-PNpi.tbl', data_file)
+                        'spp_tbl/maid07-PNpi.tbl',data_file)
             elseif (resonance_opt.eq.1) then
                 call revinm('CLAS_PARMS', &
                         'spp_tbl/maid2000_p33_on-PNpi.tbl', data_file)

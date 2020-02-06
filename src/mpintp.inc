@@ -66,7 +66,8 @@ PARAMETER(MAX_MP = 62)
 ! 	  PARAMETER( NVAR1  = 77,   NVAR2 = 26 )	! Q2,W 
 !      PARAMETER( NVAR1  = 77 , NVAR2 = 61 )	! Q2,W 
 !      PARAMETER( NVAR1  = 16 , NVAR2 = 26 )	! Q2,W 
-PARAMETER(NVAR1 = 81, NVAR2 = 91)    ! Q2,W
+!      PARAMETER( NVAR1  = 81 , NVAR2 = 91 )	! Q2,W 
+PARAMETER(NVAR1 = 101, NVAR2 = 93)    ! Q2,W maid 07
 
 ! Vectors of Kinematic Variables
 !

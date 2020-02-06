@@ -1,5 +1,5 @@
-#ifndef CUT_FID_H
-#define CUT_FID_H
+#ifndef WRAPPER_H
+#define WRAPPER_H
 
 extern "C" {
 void aao_rad_wrapper_(int *th_opt, int *flag_ehel, float *reg1, float *reg2,
