@@ -1,6 +1,6 @@
 subroutine aao_rad_wrapper(th_opt_in,flag_ehel,reg1, reg2, reg3, reg4, npart&
         , epirea_in, mm_cut, t_targ, r_targ, vertex_x,vertex_y, vz, ebeam&
-        , q2_min, q2_max, ep_min, ep_max, delta, nmax, fmcall, sigr_max, file_out)
+        , q2_min, q2_max, ep_min, ep_max, delta, nmax, fmcall, sigr_max)
 
     !     This program makes an n-tuple that can be used with Paw to
     !     make distributions of energies, angles, resonance
@@ -170,7 +170,7 @@ subroutine aao_rad_wrapper(th_opt_in,flag_ehel,reg1, reg2, reg3, reg4, npart&
     character*2 day
     character*2 year
     character*5 tag(n)
-    character*13 file_out
+    character*11 file_out
     !character*13 file_sum
     character*8 recname
     character*28  ctime
@@ -188,7 +188,7 @@ subroutine aao_rad_wrapper(th_opt_in,flag_ehel,reg1, reg2, reg3, reg4, npart&
     DATA MP   /.938/
     DATA MEL  /.511E-3/
 
-    !data file_out /'aao_rad.lund'/
+    data file_out /'aao_rad.dat'/
     !data file_sum /'aao_rad.sum'/
     data ctime    /'                            '/
 
@@ -1043,7 +1043,7 @@ subroutine aao_rad_wrapper(th_opt_in,flag_ehel,reg1, reg2, reg3, reg4, npart&
     !     Do we have enough events in the n-tuple?
     if (mod(nevent, 100) .eq. 0)then
         events = nevent
-        write(6, *)' Events: ', events
+        write (6,'(I8)') INT(events)
     endif
 
     if (nevent .gt. nmax)go to 50
@@ -1104,6 +1104,7 @@ real function sigma(ek, Tk, epcos, epphi, ehel)
     mf2 = uu - 2 * ek * (u0 - pu * csthk)
     if (mf2 .lt. wg**2 .or. qq .ge. 0.)then
         sigma = 0.
+
         return
     endif
 
@@ -1120,6 +1121,7 @@ real function sigma(ek, Tk, epcos, epphi, ehel)
     ffac = ffac1 + ffac2 + ffac3 + ffac4 + ffac5 + ffac6
     if (ffac .le. 0.)then
         sigma = 0.1e-30
+
         return
     endif
 
@@ -1131,6 +1133,7 @@ real function sigma(ek, Tk, epcos, epphi, ehel)
     gfac = gfac1 + gfac2 + gfac3 + gfac4
     if (gfac .le. 0.)then
         sigma = 0.1e-30
+
         return
     endif
     qsq = -qq
@@ -1152,6 +1155,7 @@ real function sigma(ek, Tk, epcos, epphi, ehel)
 
     if (sigma0 .le. 0.)then
         sigma = 0.0
+
         return
     endif
 
@@ -1239,12 +1243,11 @@ real function sigma(ek, Tk, epcos, epphi, ehel)
             / (sigu + epeps * sigl))
 
     if (sigf.gt.0.)go to 124
-    write(6, *)' sigma-5: sigf =', sigf
+    ! write(6, *)' sigma-5: sigf =', sigf
     sigma = 0.1e-30
     return
 
     124   sigma = sig_r * sigf
-
     return
 end
 
