@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.5)
 project(aao_rad CXX C Fortran)
 
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
 set(CMAKE_C_FLAGS "-Ofast")
 set(CMAKE_Fortran_FLAGS "-Ofast")
 
