@@ -35,11 +35,17 @@ add_library(aao_libs
         src/xsection.f90
         src/wrapper_aao_rad.f90
         src/dvmpw.f90
+        src/maidinterface.cpp
+        src/maid.F
         )
 
 add_executable(aao_rad src/aao_rad.f90)
 set_property(TARGET aao_rad PROPERTY LINKER_LANGUAGE Fortran)
 target_link_libraries(aao_rad aao_libs)
+
+add_executable(maid_csv src/maid_csv.cxx)
+set_property(TARGET maid_csv PROPERTY LINKER_LANGUAGE Fortran)
+target_link_libraries(maid_csv aao_libs)
 
 find_package(Cython)
 IF(Cython_FOUND)
