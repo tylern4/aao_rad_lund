@@ -16,7 +16,7 @@ cdef extern from "maid.h":
 @cython.wraparound(False)
 @cython.infer_types(False)
 def maid_2007_Npi(beam_energy, W, Q2, costheta, phi):
-    helicity=1
+    helicity=0
     model_opt=5
     channel_opt=3
     resonance_opt=0
