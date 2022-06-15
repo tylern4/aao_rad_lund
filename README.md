@@ -1,9 +1,17 @@
 # aao_rad_lund
 
-To build:
+To build with makefile:
 ```
 mkdir -p lib
 mkdir -p bin
+make
+```
+
+To build with cmake:
+```
+mkdir build
+cd build
+cmake ..
 make
 ```
 
@@ -13,9 +21,9 @@ tar -xvf parms.tar.gz
 export CLAS_PARMS=${PWD}/parms
 ```
 
-To run aao_rad from the folder:
+To run aao_rad from the build or bin folder:
 ```
-bin/aao_rad < test.inp
+./aao_rad < test.inp
 ```
 
 
