@@ -23,7 +23,12 @@ export CLAS_PARMS=${PWD}/parms
 
 To run aao_rad from the build or bin folder:
 ```
-./aao_rad < test.inp
+./aao_rad_lund < test.inp
 ```
 
+To run with command line arguments:
+```
+export PATH=${PATH}:${PWD}/bin
+./aao_rad --trig 1000 --experiment rgb --q2min 0.25
+```
 

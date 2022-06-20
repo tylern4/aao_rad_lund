@@ -48,7 +48,7 @@ experiments = {
         'sigrmaxmult': 0.,
         'sigr_max': .005,
     },
-    'rga': {
+    'rgb': {
         'polarized': 1,
         'ireg0': 0.20,
         'ireg1': 0.12,
