@@ -5,7 +5,7 @@ import subprocess
 import io
 
 
-inputfile = """5                       ! Physics model (5=MAID07)
+inputfile = """7                       ! Physics model (5=MAID07)
 {polarized}             ! 1 for polarized electron, 0 for unpolarized
 {ireg0} {ireg1} {ireg2} {ireg3}         ! the sizes of the integration regions
 {npart}	                    ! npart
