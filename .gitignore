@@ -31,11 +31,12 @@
 *.out
 *.app
 
-aao_rad
 aao_rad.sum
 aao_rad.lund
 *.tbl
-aao_rad
 
 build
 aao_rad.dat
+parms
+bin
+.vscode

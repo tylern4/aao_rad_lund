@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+import argparse
+import sys
+import subprocess
+import io
+
+
+inputfile = """7                       ! Physics model (5=MAID07)
+{polarized}             ! 1 for polarized electron, 0 for unpolarized
+{ireg0} {ireg1} {ireg2} {ireg3}         ! the sizes of the integration regions
+{npart}	                    ! npart
+{particle}	                    ! 1: pi0 , 3:pi+
+{errlimit}                     ! a limit on the error in (mm)**2
+{targetlenght}                     ! target cell length (cm)
+{targetradius}                   ! radius of target cyclinder
+{xbeam}                     ! x-coord of beam position
+{ybeam}                  ! y-coord of beam position
+{zbeam}                    ! z-coord of beam positio
+{beame}                 ! beam energy
+{q2min} {q2max}                  ! Q2_min, Q2_max
+{elecminp} {elecmaxp}                ! scattered electron momentum min and max
+{minphotonenergy}                    ! minimum photon energy for integration
+{trig}	                ! number of events
+{sigrmaxmult}	                    ! a multiplication factor for sigr_max
+{sigr_max}                    ! sigr_max"""
+
+experiments = {
+    'default': {
+        'polarized': 1,
+        'ireg0': .20,
+        'ireg1': .12,
+        'ireg2': .20,
+        'ireg3': .20,
+        'npart': 3,
+        'particle': 3,
+        'errlimit': .2,
+        'targetlenght': 5.0,
+        'targetradius': 0.486,
+        'xbeam': 0.3,
+        'ybeam': 0.03,
+        'zbeam': 0.,
+        'beame': 4.8,
+        'q2min': 0.9,
+        'q2max': 3.5,
+        'elecminp': 0.1,
+        'elecmaxp': 4.25,
+        'minphotonenergy': .005,
+        'sigrmaxmult': 0.,
+        'sigr_max': .005,
+    },
+    'rgb': {
+        'polarized': 1,
+        'ireg0': 0.20,
+        'ireg1': 0.12,
+        'ireg2': 0.20,
+        'ireg3': 0.20,
+        'npart': 3,
+        'particle': 3,
+        'errlimit': 0.2,
+        'targetlenght': 5.0,
+        'targetradius': 2.5,
+        'xbeam': 0.0,
+        'ybeam': 0.0,
+        'zbeam': -0.4,
+        'beame': 4.244,
+        'q2min': 0.2,
+        'q2max': 1.9,
+        'elecminp': 0.3,
+        'elecmaxp': 1.8,
+        'minphotonenergy': 0.005,
+        'sigrmaxmult': 0.,
+        'sigr_max': .005,
+    }
+}
+
+
+def aao_rad(infile):
+    process = subprocess.Popen(['aao_rad_lund'], stdin=subprocess.PIPE)
+    process.communicate(bytes(infile, 'utf-8'))
+
+
+if __name__ == '__main__':
+    # Argument parser
+    parser = argparse.ArgumentParser(description='Run aao_rad')
+    parser.add_argument('--trig', default=0, type=int)
+    parser.add_argument('--docker', default=False, action='store_true')
+    parser.add_argument('--experiment', default="None", type=str)
+
+    # Prints out nice defaults for args
+    for k, v in experiments['default'].items():
+        parser.add_argument(f'--{k}', default=v, type=type(v))
+
+    # Parse the arguments
+    args = parser.parse_args()
+    # Save them as a dictionary
+    arguments = vars(args)
+
+    # If the experiment in in the list then pull those arguments
+    if args.experiment in experiments:
+        # Take in defailts from experiment
+        formater = experiments[args.experiment]
+        # Loop through arguments
+        for k, v in arguments.items():
+            # Skip some arguments not in defaults
+            if k in ['trig', 'docker', 'experiment']:
+                continue
+            # If we've set an other argument other then whats in the defaults
+            # then we want to keep that key and over ride the experiments value
+            if experiments['default'][k] != v:
+                formater[k] = v
+
+        formater['trig'] = args.trig
+    else:
+        formater = arguments
+
+    # Pass the input file to the
+    aao_rad(inputfile.format(**formater))
