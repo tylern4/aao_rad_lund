@@ -362,7 +362,7 @@ function(_test_weak_link_project
       file(APPEND "${test_project_src_dir}/main.c" "
         goto done;
         error:
-          fprintf(stderr, \"Error occured:\\n    %s\\n\", dlerror());
+          fprintf(stderr, \"Error occurred:\\n    %s\\n\", dlerror());
           result = 1;
 
         done:
@@ -550,6 +550,8 @@ function(target_link_libraries_with_dynamic_lookup target)
           list(APPEND link_props "${dynamic_lookup_flags}")
         endif()
       endif()
+    elseif(${lib} MATCHES "(debug|optimized|general)")
+      # See gh-255
     else()
       list(APPEND link_libs "${lib}")
     endif()
@@ -577,4 +579,3 @@ function(target_link_libraries_with_dynamic_lookup target)
     target_link_libraries(${target} "${links}")
   endif()
 endfunction()
-
