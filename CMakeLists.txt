@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.20)
 project(aao_rad CXX C Fortran)
 
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
