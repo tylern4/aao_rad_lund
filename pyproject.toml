@@ -1,0 +1,63 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aao-rad"
+version = "1.0.0"
+description = "GPU-accelerated radiative pion electroproduction event generator (JAX port of aao_rad_lund)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "aao_rad_lund developers" }]
+keywords = ["electroproduction", "radiative", "pion", "JAX", "GPU", "CLAS12", "MAID"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Fortran",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+dependencies = [
+    "jax>=0.4.28",
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov",
+    "ruff>=0.4",
+]
+viz = [
+    "h5py>=3.9",
+]
+
+[project.scripts]
+aao-rad = "aao_rad.cli:main"
+aao-rad-table = "aao_rad.cli:table_main"
+
+[project.urls]
+Homepage = "https://github.com/tylern4/aao_rad_lund"
+Repository = "https://github.com/tylern4/aao_rad_lund"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/aao_rad"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/aao_rad", "tests", "README.md", "pyproject.toml", "parms"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "NPY"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402"]

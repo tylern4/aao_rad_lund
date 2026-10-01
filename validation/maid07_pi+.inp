@@ -1,0 +1,17 @@
+7                       ! theory_opt (7=MAID07)
+1                       ! 1 for polarized electron, 0 for unpolarized
+.20 .12 .20 .20         ! the sizes of the integration regions
+4                       ! npart (2 or 4)
+3                       ! epirea (1 for pi0, 3 for pi+)
+.2                      ! a limit on the error in (mm)**2
+5.0                     ! target cell length (cm)
+0.486                   ! radius of target cylinder
+0.3                     ! x-coord of beam position
+0.03                    ! y-coord of beam position
+0.0                     ! z-coord of beam position
+4.244                   ! beam energy (GeV)
+0.2 1.9                 ! Q2_min, Q2_max
+1.6 2.9                 ! scattered electron energy min and max
+.005                    ! minimum photon energy for integration
+20000                   ! number of events
+0.                      ! a multiplication factor for sigr_max (0 -> ask)
