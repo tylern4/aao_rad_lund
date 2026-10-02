@@ -128,7 +128,7 @@ def read_lund(
         first = fh.readline()
         if not first.strip():
             raise ValueError(f"{path}: file is empty")
-        header = dict(zip(HEADER_FIELDS, _floats(first, path, 0)))
+        header = dict(zip(HEADER_FIELDS, _floats(first, path, 0), strict=False))
         npart = int(header["npart"])
         line_no = 1
         for line in fh:
@@ -150,7 +150,7 @@ def read_lund(
                     f"{path}:{line_no}: track {int(values[0])} is outside the "
                     f"declared npart={npart}"
                 )
-            for key, value in zip(_TRACK_FIELDS, values):
+            for key, value in zip(_TRACK_FIELDS, values, strict=False):
                 rows[key].append(value)
 
     tracks = {k: np.asarray(v, dtype=np.float64) for k, v in rows.items()}

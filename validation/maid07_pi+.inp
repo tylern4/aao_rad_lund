@@ -1,7 +1,7 @@
 7                       ! theory_opt (7=MAID07)
 1                       ! 1 for polarized electron, 0 for unpolarized
 .20 .12 .20 .20         ! the sizes of the integration regions
-4                       ! npart (2 or 4)
+4                       ! npart (the Fortran forces 2 written tracks, aao_rad.f90:236)
 3                       ! epirea (1 for pi0, 3 for pi+)
 .2                      ! a limit on the error in (mm)**2
 5.0                     ! target cell length (cm)
@@ -13,5 +13,9 @@
 0.2 1.9                 ! Q2_min, Q2_max
 1.6 2.9                 ! scattered electron energy min and max
 .005                    ! minimum photon energy for integration
-20000                   ! number of events
-0.                      ! a multiplication factor for sigr_max (0 -> ask)
+2000                    ! number of events
+1.0                     ! multiplier on the scanned sigr_max. MUST be nonzero:
+                        ! aao_rad.f90:358 prompts on stdin for an absolute
+                        ! sigr_max when this is <= 0, which hangs a
+                        ! non-interactive run. The scan at :517 finds the
+                        ! largest trial weight, and 1.0 uses it unmodified.
