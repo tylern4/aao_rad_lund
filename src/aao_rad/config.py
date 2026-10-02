@@ -86,7 +86,8 @@ class GeneratorConfig:
     """Pion production channel: ``1`` = pi0 p, ``3`` = pi+ n."""
 
     polarized_beam: bool = True
-    """Flip the beam helicity randomly per event."""
+    """Draw the beam helicity at random (``get_spin``) per trial, as
+    ``flag_ehel = 1`` did.  ``False`` selects the unpolarised average."""
 
     # --- target geometry ---------------------------------------------------
     target_length_cm: float = 5.0
@@ -106,25 +107,30 @@ class GeneratorConfig:
     ep_max: float = 1.8
     """Scattered electron energy window [GeV]."""
 
-    w_max: float | str | None = None
-    """Reject trials whose hadronic mass exceeds this [GeV].  Defaults to the
-    table's own upper edge (2.0); pass ``"clamp"`` for the original's
-    saturating lookup.
-
-    Reject trials whose hadronic mass exceeds this [GeV].
+    w_max: float | str | None = "clamp"
+    """What to do with kinematics past the table's upper edge.
 
     The shipped MAID07 tables only span ``W in [1.08, 2.0]`` and
-    ``Q^2 in [0, 5]``.  The original saturates out-of-range lookups
-    (``multipole_amps.f90`` replaces ``W > 2`` with ``W = 2`` and ``Q^2 > 5``
-    with ``Q^2 = 5``), so any kinematics reaching past the table edge returns
-    the boundary row -- a frozen, unphysical response that also wrecks the
-    importance sampling.  The shipped ``test.inp`` / ``clas12_test.inp`` run
-    cards sit almost entirely outside the table for exactly this reason.
+    ``Q^2 in [0, 5]``.  The original *saturates*: ``multipole_amps.f90`` replaces
+    ``W > 2`` with ``W = 2`` and ``Q^2 > 5`` with ``Q^2 = 5`` before the table
+    lookup, so anything past the edge returns the boundary row -- a frozen,
+    unphysical response.  That is what ``"clamp"`` (the default) reproduces, and
+    it is what the reference run card needs: with ``W`` above 2 GeV carrying
+    roughly a third of the sampled cross section, rejecting instead drops the
+    total by about 30%.
 
-    By default this port rejects such trials instead, which keeps the sampled
-    cross section inside the region the response actually describes.  Set to a
-    number to choose the edge yourself, or to ``"clamp"`` to reproduce the
-    original's saturating behaviour exactly.
+    Note that the saturation applies only to the *lookup*.  ``nu_cm``,
+    ``qv_mag_cm``, ``ppi_mag_cm`` and ``ekin`` are all evaluated at the
+    unclamped ``W``/``Q^2``, exactly as ``maid_lee.f90`` does before it ever
+    reaches the table, so ``sigma_l`` keeps rising past the edge instead of
+    freezing with it.
+
+    Pass a number to reject trials whose hadronic mass exceeds that value in
+    GeV, or ``None`` for the table's own upper edge (2.0).  Rejecting keeps the
+    sampled cross section inside the region the response actually describes, at
+    the cost of no longer matching the original's integral.  The shipped
+    ``test.inp`` / ``clas12_test.inp`` run cards sit almost entirely outside the
+    table, so they are much better behaved this way.
     """
 
     # --- radiative sampling -------------------------------------------------
@@ -176,6 +182,23 @@ class GeneratorConfig:
     """Table interpolation.  ``linear`` matches the original (which set
     ``method_spline = 2``)."""
 
+    weight_max_margin: float = 1.5
+    """Safety factor on the rejection sampler's acceptance ceiling.
+
+    Accepting ``u * ceiling < weight`` is ``min(1, weight/ceiling)``, which
+    samples events as ``weight`` only while the ceiling exceeds every weight in
+    the run; past it a trial is over-represented by ``ceiling/weight``.  The
+    ceiling is the largest weight of a pilot batch, the integrand has a heavy
+    tail near the beam line, and the largest weight has no finite upper bound,
+    so this factor buys headroom over the pilot estimate and the run raises the
+    ceiling again (with a warning) if anything still exceeds it.  The residual is
+    reported as :attr:`GenerationStats.ceiling_bias`.
+
+    Acceptance is ``mean(weight) / ceiling``, so this is a direct throughput
+    trade: 1.5 accepts about a third more trials than 2.0.  :attr:`sigma_mc` is
+    built from *all* trial weights and is never affected either way.
+    """
+
     write_tracks: bool = True
     """Write all ``n_tracks`` particle lines.  The Fortran wrote only two
     track lines while declaring up to four in the header, which produces a
@@ -221,12 +244,14 @@ class GeneratorConfig:
             raise ValueError("require 0 < ep_min < ep_max")
         if self.batch_size < 1024:
             raise ValueError("batch_size must be at least 1024 to fill the GPU")
+        if self.weight_max_margin < 1.0:
+            raise ValueError("weight_max_margin must be at least 1")
         if self.w_max is not None and self.w_max != "clamp":
             if not 1.1 <= float(self.w_max) <= 2.0:
                 raise ValueError(
                     f"w_max={self.w_max} is outside the MAID07 table, which spans "
-                    "W in [1.08, 2.0]; use 'clamp' to reproduce the original's "
-                    "saturating lookup instead"
+                    "W in [1.08, 2.0]; use w_max='clamp' (the default) to reproduce "
+                    "the original's saturating lookup instead"
                 )
 
     # ------------------------------------------------------------------

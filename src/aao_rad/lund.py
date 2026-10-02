@@ -31,8 +31,9 @@ the same memory as a million-event one.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator, TextIO
+from typing import TextIO
 
 import numpy as np
 

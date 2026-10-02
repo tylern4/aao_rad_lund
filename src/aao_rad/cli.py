@@ -24,7 +24,7 @@ from .config import EXPERIMENTS, GeneratorConfig
 
 log = logging.getLogger("aao_rad")
 
-_EPILOG = f"""\
+_EPILOG = """\
 examples:
   aao-rad --experiment rgb --n-events 1000000 --output rgb.lund
   aao-rad --experiment default --n-events 5e6 --format npz --output rgb.npz
@@ -113,6 +113,9 @@ def build_parser() -> argparse.ArgumentParser:
     adv.add_argument("--ek-sampling", choices=("truncated", "fortran"), default=None,
                      help="photon energy sampling; 'fortran' reproduces the original RNG-limited range")
     adv.add_argument("--cos-step", type=float, help="csrng: width of the narrow angular bands")
+    adv.add_argument("--weight-max-margin", type=float,
+                     help="safety factor on the estimated acceptance ceiling "
+                          "(default: %(default)s)")
     adv.add_argument("--k-exp", type=float, help="slope of the photon energy variable")
     adv.add_argument("--region", type=float, nargs=4, metavar=("R1", "R2", "R3", "R4"),
                      help="sizes of the four importance sampling regions")
@@ -175,6 +178,7 @@ def config_from_args(args: argparse.Namespace) -> GeneratorConfig:
         "ek_sampling": args.ek_sampling,
         "cos_step": args.cos_step,
         "k_exp": args.k_exp,
+        "weight_max_margin": args.weight_max_margin,
         "regions": tuple(args.region) if args.region else None,
         "write_tracks": False if args.two_tracks else None,
     }
