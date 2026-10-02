@@ -23,7 +23,6 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
-import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -82,7 +81,6 @@ def bilinear(
     x1, x2 = jnp.broadcast_arrays(jnp.asarray(x1), jnp.asarray(x2))
     shape = x1.shape
     flat1, flat2 = x1.ravel(), x2.ravel()
-    n = flat1.size
 
     i, t = _bracket(axis1, flat1, uniform=uniform1)
     j, u = _bracket(axis2, flat2, uniform=uniform2)

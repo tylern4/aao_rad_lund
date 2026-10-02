@@ -22,7 +22,12 @@ from typing import NamedTuple
 
 import jax.numpy as jnp
 
-from .amplitudes import cgln_amplitudes, helicity_amplitudes, legendre_polynomials, multipole_amplitudes
+from .amplitudes import (
+    cgln_amplitudes,
+    helicity_amplitudes,
+    legendre_polynomials,
+    multipole_amplitudes,
+)
 from .constants import M_N
 from .interpolate import InterpolationGrid
 
@@ -42,15 +47,36 @@ class Response(NamedTuple):
 
 
 def _center_of_mass(w: jnp.ndarray, q2: jnp.ndarray, m_pi: float) -> tuple[jnp.ndarray, ...]:
-    """Centre-of-mass kinematics of the pion (``maid_lee.f90`` lines 63-73)."""
+    """Centre-of-mass kinematics of the pion (``maid_lee.f90`` lines 100-107).
+
+    ``w`` and ``q2`` must be the *unclamped* kinematics.  ``maid_lee`` evaluates
+    these before it ever reaches the table, and ``multipole_amps.f90`` later
+    clamps only the ``interp`` argument, so the original really does combine a
+    clamped lookup with unclamped ``nu_cm``/``qv_mag_cm``.  See
+    :func:`response_functions`.
+    """
     m_p2 = M_N * M_N
     w2 = w * w
     e_pi_cm = 0.5 * (w2 + m_pi * m_pi - m_p2) / w
     p_pi_cm = jnp.sqrt(jnp.maximum(e_pi_cm * e_pi_cm - m_pi * m_pi, 0.0))
     qv_cm = jnp.sqrt(jnp.maximum(((w2 + q2 + m_p2) / (2.0 * w)) ** 2 - m_p2, 0.0))
     nu_cm = (w2 - m_p2 - q2) / (2.0 * w)
-    fkt = 2.0 * w * p_pi_cm / jnp.maximum(w2 - m_p2, 1e-12)
-    return p_pi_cm, qv_cm, nu_cm, fkt
+    return p_pi_cm, qv_cm, nu_cm
+
+
+def _fkt(w: jnp.ndarray, p_pi_cm: jnp.ndarray) -> jnp.ndarray:
+    """Pion phase-space factor ``fkt`` (``xsection.f90`` line 28).
+
+    ``xsection.f90`` recomputes ``fkt`` from ``W`` *after* calling
+    ``multipole_amps``, and ``multipole_amps.f90`` line 16 assigns ``w = 1.1``
+    into the shared COMMON when ``w <= 1.1``.  So the denominator's ``W`` carries
+    that floor while ``ppi_mag_cm`` and ``nu_cm`` do not.  Below threshold the
+    original therefore evaluates a different (and dimensionally odd) expression
+    from the one above threshold; that asymmetry is reproduced here rather than
+    smoothed over.
+    """
+    w_floor = jnp.maximum(w, 1.1)
+    return 2.0 * w_floor * p_pi_cm / jnp.maximum(w_floor * w_floor - M_N * M_N, 1e-12)
 
 
 def response_functions(
@@ -88,11 +114,20 @@ def response_functions(
         Interpolation scheme, ``"linear"`` (default, matches the original) or
         ``"spline"``.
     """
-    # The original clamped W to [1.1, 2.0] and Q2 to [0, 5] before interpolating.
+    # The original's clamping is *not* a single up-front clip, and getting that
+    # wrong is visible.  multipole_amps.f90:16-28 raises W to 1.1 in the shared
+    # COMMON and then picks one of four `interp` corners -- (Q2 or 5) x (W or
+    # 2.0) -- so the *lookup* saturates in both directions while maid_lee.f90
+    # has already computed nu_cm, qv_mag_cm and ppi_mag_cm from the unclamped
+    # kinematics.  xsection.f90:27-28 then re-reads W (now floored at 1.1, but
+    # not capped above) for ekin and fkt.  Clipping W before the kinematics
+    # instead, as an earlier revision did, inflates sigma_l by up to 40% for
+    # W > 2 because ekin = sqrt(Q2)/nu_cm grows as nu_cm shrinks.
     w_c = jnp.clip(w, 1.1, 2.0)
     q2_c = jnp.minimum(q2, 5.0)
 
-    p_pi_cm, qv_cm, nu_cm, fkt = _center_of_mass(w_c, q2_c, m_pi)
+    p_pi_cm, qv_cm, nu_cm = _center_of_mass(w, q2, m_pi)
+    fkt = _fkt(w, p_pi_cm)
 
     amps = grid(q2_c, w_c, scheme=scheme)  # (batch, 62)
     sp, sm, ep, em, mp, mm = multipole_amplitudes(amps, nu_cm, qv_cm)
@@ -110,8 +145,9 @@ def response_functions(
     sigma_lt = sqrt2 * (jnp.conj(hh5) * (hh1 - hh4) + jnp.conj(hh6) * (hh2 + hh3)).real
     sigma_ltp = sqrt2 * (jnp.conj(hh5) * (hh4 - hh1) - jnp.conj(hh6) * (hh2 + hh3)).imag
 
-    # Longitudinal terms are suppressed by ekin = |Q| / nu_cm.
-    ekin = jnp.sqrt(jnp.maximum(q2_c, 0.0)) / nu_cm
+    # Longitudinal terms are suppressed by ekin = |Q| / nu_cm, with both taken
+    # unclamped (xsection.f90 line 27).
+    ekin = jnp.sqrt(jnp.maximum(q2, 0.0)) / nu_cm
     sigma_l = sigma_l * ekin**2
     sigma_lt = sigma_lt * ekin
     sigma_ltp = sigma_ltp * ekin

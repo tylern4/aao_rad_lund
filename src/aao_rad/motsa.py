@@ -270,7 +270,6 @@ def non_radiative_sigma(
     signr = 2.0 * (ALPHA * ep / _safe(q2)) ** 2 * (
         f * M_N * jnp.cos(th0 / 2.0) ** 2 + 2.0 * g * jnp.sin(th0 / 2.0) ** 2 / M_N
     )
-    denom = resp.sigma_t + epeps * resp.sigma_l
     signr = signr * (1.0 + polarization_modulation(resp, epeps, phi, e_hel))
 
     # Soft-gluon and vertex corrections (Mo & Tsai, Appendix C).

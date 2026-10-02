@@ -139,7 +139,9 @@ def hadronic_final_state(
         (w_real**2 - M_N**2 - m_pi**2) ** 2 / 4.0 - (M_N * m_pi) ** 2
     ) / jnp.maximum(w_real**2, 1e-12)
     pstar = jnp.sqrt(jnp.maximum(pstar_sq, 0.0))
-    e_pcm = jnp.sqrt(pstar**2 + M_N**2)
+    # e_pcm is not needed: aao_rad.f90 builds the proton's z component as
+    # ``gamma*beta*wreal - ppiwz``, which is the same thing without forming
+    # ``epicm + epcm`` explicitly.
     e_picm = jnp.sqrt(pstar**2 + m_pi**2)
 
     snthcm = jnp.sqrt(jnp.maximum(1.0 - jnp.clip(cos_theta_cm, -1.0, 1.0) ** 2, 0.0))

@@ -35,8 +35,12 @@ _MAID_TO_SQRT_MUB = 0.141383
 
 _ROOT2 = jnp.sqrt(2.0)
 _LF = jnp.arange(N_WAVE, dtype=jnp.float32)
-#: Fortran guards ``if (l < 2) ... else ...``; these are the "else" masks.
-_L_GE_2 = (jnp.arange(N_WAVE) >= 2)[None, :]
+_L = jnp.arange(N_WAVE)
+#: Fortran loop bounds, as masks.  ``cgln_amps.f90`` starts ff3/ff6 at ``l = 1``
+#: and ff4 at ``l = 2``; the skipped terms are *not* zero (P_1^2 is the constant
+#: 3 and sp(0) is tabulated), so they have to be masked off explicitly.
+_L_GE_1 = (_L >= 1)[None, :]
+_L_GE_2 = (_L >= 2)[None, :]
 
 
 def _shift(a: jnp.ndarray, amount: int) -> jnp.ndarray:
@@ -147,26 +151,23 @@ def cgln_amplitudes(
     same2 = p2[:, :N_WAVE]  # P_l^2
     up1 = p1[:, 1 : N_WAVE + 1]  # P_{l+1}^1
     up2 = p2[:, 1 : N_WAVE + 1]  # P_{l+1}^2
-    # Truncate the down-shifted arrays to N_WAVE: the leading `amount` entries
-    # are the shifted-in junk that `gate` masks out.
+    # Down-shifted: index l reads P_{l-1}, valid only for l >= 2.  Truncating to
+    # N_WAVE leaves the leading entries holding P_0/P_1, which the masks drop.
     dn1 = _shift(p1, 1)[:, :N_WAVE]  # P_{l-1}^1
-    dn2 = _shift(p2, 2)[:, :N_WAVE]  # P_{l-1}^2
+    dn2 = _shift(p2, 1)[:, :N_WAVE]  # P_{l-1}^2
 
-    gate = _L_GE_2.astype(up1.dtype)
-    # ff2 / ff6 are summed from l = 1, ff4 from l = 2; the l = 0 and l = 1
-    # terms carry P_0^1 = 0 (ff2, ff6) and are zeroed explicitly (ff4).
+    ge1 = _L_GE_1.astype(up1.dtype)
+    ge2 = _L_GE_2.astype(up1.dtype)
+
+    # cgln_amps.f90 lines 23-57, loop by loop.
     ff1 = jnp.sum(
-        (_LF * mp + ep) * up1 + gate * (((_LF + 1.0) * mm + em) * dn1), axis=1
+        (_LF * mp + ep) * up1 + ge2 * (((_LF + 1.0) * mm + em) * dn1), axis=1
     )
     ff2 = jnp.sum(((_LF + 1.0) * mp + _LF * mm) * same1, axis=1)
-    ff3 = jnp.sum((ep - mp) * up2 + gate * ((em + mm) * dn2), axis=1)
-    ff4 = jnp.sum(
-        (jnp.concatenate([jnp.zeros_like(mp[:, :2]), mp - ep - mm - em], axis=1)[:, :N_WAVE])
-        * same2,
-        axis=1,
-    )
-    ff5 = jnp.sum(((_LF + 1.0) * sp) * up1 + gate * (-_LF * sm * dn1), axis=1)
-    ff6 = jnp.sum((_LF * sm - (_LF + 1.0) * sp) * same1, axis=1)
+    ff3 = jnp.sum(ge1 * (ep - mp) * up2 + ge2 * ((em + mm) * dn2), axis=1)
+    ff4 = jnp.sum(ge2 * (mp - ep - mm - em) * same2, axis=1)
+    ff5 = jnp.sum(((_LF + 1.0) * sp) * up1 + ge2 * (-_LF * sm * dn1), axis=1)
+    ff6 = jnp.sum(ge1 * (_LF * sm - (_LF + 1.0) * sp) * same1, axis=1)
 
     return ff1, ff2, ff3, ff4, ff5, ff6
 
