@@ -121,8 +121,9 @@ def response_functions(
     # has already computed nu_cm, qv_mag_cm and ppi_mag_cm from the unclamped
     # kinematics.  xsection.f90:27-28 then re-reads W (now floored at 1.1, but
     # not capped above) for ekin and fkt.  Clipping W before the kinematics
-    # instead, as an earlier revision did, inflates sigma_l by up to 40% for
-    # W > 2 because ekin = sqrt(Q2)/nu_cm grows as nu_cm shrinks.
+    # instead, as an earlier revision did, inflates sigma_l by (ekin_clamped /
+    # ekin_unclipped)^2: 1.35x at W = 2.2, Q^2 = 0.1, rising to 5x by
+    # W = 3, because ekin = sqrt(Q^2)/nu_cm grows as nu_cm shrinks.
     w_c = jnp.clip(w, 1.1, 2.0)
     q2_c = jnp.minimum(q2, 5.0)
 

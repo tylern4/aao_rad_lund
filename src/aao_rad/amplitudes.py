@@ -37,8 +37,12 @@ _ROOT2 = jnp.sqrt(2.0)
 _LF = jnp.arange(N_WAVE, dtype=jnp.float32)
 _L = jnp.arange(N_WAVE)
 #: Fortran loop bounds, as masks.  ``cgln_amps.f90`` starts ff3/ff6 at ``l = 1``
-#: and ff4 at ``l = 2``; the skipped terms are *not* zero (P_1^2 is the constant
-#: 3 and sp(0) is tabulated), so they have to be masked off explicitly.
+#: and ff4 at ``l = 2``.  These are inert numerically -- every term they drop
+#: multiplies ``P_0^1``, ``P_0^2`` or ``P_1^2``, all of which are identically
+#: zero -- and they are kept because they document the original's bounds and
+#: because nothing guarantees that stays true for a different Legendre
+#: evaluation.  The down-shift amount below is what actually matters: reading
+#: ``P_{l-1}^2`` as ``P_{l-2}^2`` moves ff3 by 18%.
 _L_GE_1 = (_L >= 1)[None, :]
 _L_GE_2 = (_L >= 2)[None, :]
 
@@ -139,10 +143,14 @@ def cgln_amplitudes(
 ) -> tuple[jnp.ndarray, ...]:
     """CGLN amplitudes ``ff1..ff6`` in Tiator's helicity formalism.
 
-    ``pol`` is the output of :func:`legendre_polynomials`.  The Fortran's
-    ``if (l < 2) ... else ...`` branches are merged by summing both
-    contributions and masking the out-of-range one, which is exactly what the
-    original intended (the masked terms would read uninitialised ``pol(-1, k)``).
+    ``pol`` is the output of :func:`legendre_polynomials`, shaped
+    ``(batch, N_WAVE + 2, 2)``; the partial-wave amplitudes are shaped
+    ``(batch, N_WAVE)`` or ``(batch, 1)``.
+
+    The Fortran's ``if (l < 2) ... else ...`` branches are merged by summing both
+    contributions and masking the out-of-range one, so the loops run
+    unconditionally and the vectorisation stays branch-free.  See
+    ``_L_GE_1``/``_L_GE_2`` for why the masks are safe.
     """
     p1 = pol[..., 0]  # P_l^1
     p2 = pol[..., 1]  # P_l^2
@@ -153,6 +161,8 @@ def cgln_amplitudes(
     up2 = p2[:, 1 : N_WAVE + 1]  # P_{l+1}^2
     # Down-shifted: index l reads P_{l-1}, valid only for l >= 2.  Truncating to
     # N_WAVE leaves the leading entries holding P_0/P_1, which the masks drop.
+    # The amount is load-bearing, the mask is not: amount 2 instead of 1 shifts
+    # ff3 by 18%, while the masks change nothing (see _L_GE_2 above).
     dn1 = _shift(p1, 1)[:, :N_WAVE]  # P_{l-1}^1
     dn2 = _shift(p2, 1)[:, :N_WAVE]  # P_{l-1}^2
 
