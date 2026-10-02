@@ -29,8 +29,9 @@ from __future__ import annotations
 import logging
 import os
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Any, Iterator, NamedTuple
+from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -57,9 +58,14 @@ __all__ = [
     "EVENT_DTYPE",
     "EventGenerator",
     "GenerationStats",
+    "Integrand",
     "Kinematics",
     "build_grid",
     "build_kinematics",
+    "draw_kinematics",
+    "draw_photon",
+    "finalize",
+    "integrand",
 ]
 
 log = logging.getLogger(__name__)
@@ -322,10 +328,17 @@ def draw_kinematics(key, kin: Kinematics, n: int) -> dict[str, jnp.ndarray]:
 
 def draw_photon(key, kin: Kinematics, kv: dict, n: int) -> dict[str, jnp.ndarray]:
     """Importance-sample the photon direction and energy (statements 10-14)."""
-    keys = jax.random.split(key, 9)
+    # One key per independent variate.  ``k_cm`` and ``k_cm_phi`` must stay
+    # separate: cos(theta*) and phi* are two independent uniforms in the
+    # Fortran (aao_rad.f90:779-780) and they enter mm2 through different
+    # combinations of the pion momentum components, so sharing one key does not
+    # cancel -- it confines the decay direction to a curve instead of the
+    # sphere.  Both marginals stay uniform under such a constraint, which is
+    # why the error is invisible in either histogram alone.
+    keys = jax.random.split(key, 10)
     dt = kin.e_beam.dtype
     u = lambda k: jax.random.uniform(k, (n,), dtype=dt)  # noqa: E731
-    k_reg, k_sign, k_pos, k_pos2, k_phi, k_ek, k_cm, k_spin, k_redraw = keys
+    k_reg, k_sign, k_pos, k_pos2, k_phi, k_ek, k_cm, k_cm_phi, k_spin, k_redraw = keys
 
     cstk1 = jnp.maximum(kv["csths"], kv["csthp"])
     cstk2 = jnp.minimum(kv["csths"], kv["csthp"])
@@ -367,11 +380,12 @@ def draw_photon(key, kin: Kinematics, kv: dict, n: int) -> dict[str, jnp.ndarray
     mpfac = jnp.where(narrow, del_phi / (2.0 * PI), 1.0)
 
     # Region 5 must not double-sample the narrow bands around the beam lines.
+    # aao_rad.f90:721 tests the two bands with ``.or.``: being inside *either*
+    # one is enough to collide.
     collide = (
         (jnp.abs(cstk - cstk1) < cs_range)
-        & (jnp.abs(cstk - cstk2) < cs_range)
-        & (jnp.abs(phik) < del_phi / 2.0)
-    )
+        | (jnp.abs(cstk - cstk2) < cs_range)
+    ) & (jnp.abs(phik) < del_phi / 2.0)
     # Branch-free redraw: no Python-level `if` on a traced array.  Each pass
     # needs its own key, otherwise every iteration draws the same uniform and
     # the retry does nothing.  Points that still collide after the last pass
@@ -383,8 +397,7 @@ def draw_photon(key, kin: Kinematics, kv: dict, n: int) -> dict[str, jnp.ndarray
         )
         collide = (
             (~narrow)
-            & (jnp.abs(cstk - cstk1) < cs_range)
-            & (jnp.abs(cstk - cstk2) < cs_range)
+            & ((jnp.abs(cstk - cstk1) < cs_range) | (jnp.abs(cstk - cstk2) < cs_range))
             & (jnp.abs(phik) < del_phi / 2.0)
         )
 
@@ -396,36 +409,88 @@ def draw_photon(key, kin: Kinematics, kv: dict, n: int) -> dict[str, jnp.ndarray
 
     # --- photon energy -----------------------------------------------------
     ek_max = 0.5 * (kv["uu"] - kin.wg**2) / (kv["u0"] - kv["pu"] * cstk)
-    ek_max = jnp.clip(ek_max, 1e-6, kin.e_beam)
+    # aao_rad.f90:747-750 only caps the top end; a non-positive ek_max makes
+    # every draw fail ``ek > ekmax`` at line 763, so it has to be a rejection
+    # rather than a clipped floor.
+    ok = ok & (ek_max > 0.0)
+    ek_max_cap = jnp.clip(ek_max, 1e-6, kin.e_beam)
 
     uek = u(k_ek)
-    tail = jnp.exp(-kin.k_exp * ek_max)
+    tail = jnp.exp(-kin.k_exp * ek_max_cap)
     # Truncated-exponential inverse CDF: no trial is discarded for ek > ek_max.
-    ek = jnp.where(
+    # The *unclipped* draw is what gets tested against ``ek_max``: the original
+    # draws ek = -log(uek)/kexp and sends the trial back to label 20 when
+    # ``ek .gt. ekmax`` (aao_rad.f90:757-763).  Clipping first and then
+    # comparing would make the test vacuous, silently replacing a rejection with
+    # a spike of full-weight points piled up on ek_max -- which is worth about
+    # 1% of the cross section and shifts <ek> by 2%.
+    ek_drawn = jnp.where(
         kin.truncated_ek > 0.5,
         -jnp.log1p(-uek * (1.0 - tail)) / kin.k_exp,
         -jnp.log(jnp.maximum(uek, 1e-30)) / kin.k_exp,
     )
-    ek = jnp.minimum(jnp.maximum(ek, 0.0), ek_max)
+    ok = ok & (ek_drawn > 0.0) & (ek_drawn <= ek_max)
+    # Only round-off can put the truncated draw outside the window; clamp it so
+    # the recorded point stays physical, which cannot affect the mask above.
+    ek = jnp.minimum(jnp.maximum(ek_drawn, 0.0), ek_max_cap)
     jac_ek = jnp.where(
         kin.truncated_ek > 0.5,
-        jnp.exp(kin.k_exp * ek) / (kin.k_exp * jnp.maximum(1.0 - tail, 1e-12)),
+        jnp.exp(kin.k_exp * ek) / (kin.k_exp * jnp.maximum(1.0 - jnp.exp(-kin.k_exp * ek_max_cap), 1e-12)),
         jnp.exp(kin.k_exp * ek) / kin.k_exp,
     )
-    ok = ok & (ek > 0.0) & (ek <= ek_max)
 
     csthcm = 2.0 * u(k_cm) - 1.0
-    phicm_deg = 360.0 * jax.random.uniform(k_cm, (n,), dtype=dt)
+    phicm_deg = 360.0 * u(k_cm_phi)
+    # flag_ehel = 1 draws the helicity per trial (aao_rad.f90:521, get_spin);
+    # the unpolarised case averages over it.
     e_hel = jnp.where(kin.polarized > 0.5, jnp.where(u(k_spin) < 0.5, -1.0, 1.0), 0.0)
 
     return dict(
-        cstk=cstk, tk=tk, sntk=sntk, phik=phik, ek=ek, ek_max=ek_max,
+        cstk=cstk, tk=tk, sntk=sntk, phik=phik, ek=ek, ek_max=ek_max_cap,
         csthcm=csthcm, phicm_deg=phicm_deg, e_hel=e_hel,
         mcfac=mcfac, mpfac=mpfac, jac_ek=jac_ek, ok=ok,
+        # The region-selection uniform, kept so that validation can recover
+        # ``intreg`` from aao_rad.f90:657-731 without reconstructing the
+        # regions from the sampled point (see validation/compare_trials.py).
+        csran=csran, cs_rngb=cs_rngb, cs_range=cs_range,
+        cstk1=cstk1, cstk2=cstk2,
     )
 
 
-def integrand(grid, kin: Kinematics, kv, ph, scheme: str):
+class Integrand(NamedTuple):
+    """Result of :func:`integrand` for a batch of trial points.
+
+    Attributes
+    ----------
+    weight:
+        Trial weight masked by :attr:`ok_sampling` only, so its maximum is the
+        unconditional maximum of the integrand -- the ceiling the original
+        scanned for at ``aao_rad.f90:475-513``.  Callers that want the
+        cross-section estimate must mask it with :attr:`ok`.
+    asym:
+        Single-spin beam asymmetry, broadcast to the batch.
+    ok:
+        Trials that survive *every* selection, including the missing-mass cut.
+        These, and only these, contribute to the cross-section estimate.
+    ok_sampling:
+        Trials for which the integrand itself is defined and positive.
+    sigr:
+        The cross section alone, before the region, multipole and Jacobian
+        factors are applied.  ``weight`` is ``sigr * mcfac * mpfac * jacob``, and
+        the three factors after ``sigr`` are pure geometry that the port
+        reproduces exactly, so this is what validation has to compare in order
+        to attribute a :attr:`weight` mismatch to the physics rather than to the
+        sampling.
+    """
+
+    weight: Any
+    asym: Any
+    ok: Any
+    ok_sampling: Any
+    sigr: Any
+
+
+def integrand(grid, kin: Kinematics, kv, ph, scheme: str) -> Integrand:
     """Integrand weight and beam asymmetry for every trial point."""
     es, ep, th0, cst0 = kv["es"], kv["ep"], kv["th0"], kv["cst0"]
     ek, cstk, sntk, phik = ph["ek"], ph["cstk"], ph["sntk"], ph["phik"]
@@ -461,8 +526,23 @@ def integrand(grid, kin: Kinematics, kv, ph, scheme: str):
 
     jacob = ph["jac_ek"] / (2.0 * es * ep) * kv["q2"] ** 2
     weight = sigr * ph["mcfac"] * ph["mpfac"] * jacob
-    ok = ph["ok"] & (sigr > _NEGLIGIBLE) & jnp.isfinite(weight)
-    return jnp.where(ok, weight, 0.0), asym, ok
+    ok_sampling = ph["ok"] & (sigr > _NEGLIGIBLE) & jnp.isfinite(weight)
+
+    # aao_rad.f90:905-909 builds the hadronic final state with the *pre-exit*
+    # electron energy and throws the trial away when the missing mass falls
+    # outside the cut -- and that test sits *before* ``sig_tot = sig_tot + sigr``
+    # at line 916.  The cut therefore has to gate the trial weight, not just
+    # the event record, or the cross-section estimate picks up the rejected
+    # non-resonant weight.
+    fs = hadronic_final_state(
+        kin.e_beam, kv["es"], kv["ep"], kv["th0"], ph["ek"], ph["cstk"], ph["phik"],
+        ph["csthcm"], ph["phicm_deg"], kin.m_pi, kin.is_pi0,
+    )
+    ok = ok_sampling & (fs.w_real > 0.0) & (jnp.abs(fs.mm2 - kin.m_exp) <= kin.mm_cut)
+    return Integrand(
+        jnp.where(ok_sampling, weight, 0.0), asym, ok, ok_sampling,
+        jnp.where(ok_sampling, sigr, 0.0),
+    )
 
 
 def _photon_vector(kin: Kinematics, kv, ep_out, ph):
@@ -533,7 +613,11 @@ def finalize(kin: Kinematics, kv, ph, asym, key, n: int):
     q2_meas = 2.0 * kin.e_beam * ep_out * (1.0 - c_the) - 2.0 * M_E**2
     w_meas = jnp.sqrt(jnp.maximum(M_N**2 + 2.0 * M_N * nu - q2_meas, 0.0))
 
-    ok = ok & (fs.w_real > 0.0) & (jnp.abs(fs.mm2 - kin.m_exp) <= kin.mm_cut)
+    # aao_rad.f90:984 rejects only ``mm2 == 0`` (below pion threshold) and
+    # ``ep < ep_min`` here; the missing-mass *cut* was already applied, with the
+    # pre-exit energy, before the trial was accepted at all.  Re-applying it
+    # would drop a second, uncounted set of events.
+    ok = ok & (fs.w_real > 0.0)
 
     k_vec = _photon_vector(kin, kv, ep_out, ph)
     # Column order must match EVENT_COLUMNS.
@@ -578,7 +662,19 @@ class GenerationStats:
     n_sampling_accepted: int = 0
     """Trials the importance sampler accepted, before any kinematic cut."""
     n_above_ceiling: int = 0
-    """Legal trials whose weight exceeded :attr:`weight_max` and were lost."""
+    """Legal trials whose weight exceeded :attr:`weight_max`.
+
+    Such a trial is accepted with probability 1 rather than ``w / weight_max``,
+    so it is over-represented in the event stream.  :attr:`ceiling_bias` is the
+    size of that effect on the sampled cross section.
+    """
+    ceiling_bias: float = 0.0
+    """Fraction of the cross section carried by :attr:`n_above_ceiling`.
+
+    :attr:`sigma_mc` sums the trial weight over *every* trial, so it is
+    unaffected by the ceiling; only the event-by-event distributions are.  This
+    bounds that error, and it should be small.
+    """
     acceptance: float = 0.0
     """Importance-sampler efficiency, ``n_sampling_accepted / n_trials``."""
     event_yield: float = 0.0
@@ -592,9 +688,11 @@ class GenerationStats:
     """The same, from the *sampling* acceptance against ``weight_max``.
 
     ``E[weight | accepted] = weight_max * P(u < weight / weight_max) =
-    mean(weight)``, so this is an independent unbiased estimator of
-    :attr:`sigma_mc` that shares none of its code path -- which makes the
-    agreement between the two a useful self-check.
+    mean(weight)``, so summing ``accepted * weight_max`` over the trials gives an
+    independent unbiased estimator of :attr:`sigma_mc` that shares none of its
+    code path -- which makes the agreement between the two a useful self-check.
+    Accumulated per batch, so it stays exact when the ceiling is raised
+    mid-run.
     """
     phase_space: float = 0.0
     """(4 pi)^2 * 2 pi * d(1/Q^2) * dE': converts mean weight to a cross section."""
@@ -615,7 +713,8 @@ class GenerationStats:
             f"event yield      : {100.0 * self.event_yield:.3f}%\n"
             f"weight max / mean: {self.weight_max:.6g}{clipped} / "
             f"{self.mean_weight:.6g}\n"
-            f"above ceiling    : {self.n_above_ceiling:,}\n"
+            f"above ceiling    : {self.n_above_ceiling:,} trials, "
+            f"{self.ceiling_bias:.2%} of the cross section\n"
             f"sigma (MC)       : {self.sigma_mc:.6g} micro-barn\n"
             f"sigma (accepted) : {self.sigma_accepted:.6g} micro-barn\n"
             f"throughput       : {self.events_per_second:,.0f} events/s "
@@ -634,8 +733,8 @@ def _make_sampler(grid, kin: Kinematics, scheme: str, n: int):
     def sample(key):
         kv = draw_kinematics(key, kin, n)
         ph = draw_photon(jax.random.fold_in(key, 1), kin, kv, n)
-        weight, asym, ok = integrand(grid, kin, kv, ph, scheme)
-        return weight, ok
+        weight = integrand(grid, kin, kv, ph, scheme)[0]
+        return weight
 
     return jax.jit(sample)
 
@@ -651,7 +750,12 @@ def _make_stepper(grid, kin: Kinematics, scheme: str, n: int, capacity: int):
     def step(key, buffer, write_pos, weight_max):
         kv = draw_kinematics(key, kin, n)
         ph = draw_photon(jax.random.fold_in(key, 1), kin, kv, n)
-        weight, asym, ok = integrand(grid, kin, kv, ph, scheme)
+        integ = integrand(grid, kin, kv, ph, scheme)
+        asym, ok = integ.asym, integ.ok
+        # The cross-section estimator sums the trial weight over *every* trial
+        # that survives the missing-mass cut (aao_rad.f90:916), zero elsewhere.
+        weight = jnp.where(ok, integ.weight, 0.0)
+        raw_weight = integ.weight
 
         u_acc = jax.random.uniform(jax.random.fold_in(key, 2), (n,), dtype=weight.dtype)
         # The sampling acceptance is the pure importance-sampler efficiency: it
@@ -661,7 +765,7 @@ def _make_stepper(grid, kin: Kinematics, scheme: str, n: int, capacity: int):
         # A weight above the ceiling can never be accepted (weight/weight_max
         # > 1), so the trial is simply lost.  Counting these says whether the
         # ceiling estimated on the device was good enough.
-        above = ok & (weight > weight_max)
+        above = ok & (raw_weight > weight_max)
 
         rec, final_ok = finalize(kin, kv, ph, asym, jax.random.fold_in(key, 3), n)
         accept = sampled & final_ok
@@ -682,7 +786,16 @@ def _make_stepper(grid, kin: Kinematics, scheme: str, n: int, capacity: int):
             [
                 jnp.sum(sampled),
                 jnp.sum(above),
-                jnp.max(jnp.where(ok, weight, 0.0)),
+                # Maximum over the trials that actually reach the event stream.
+                # A trial the missing-mass cut rejects contributes nothing to the
+                # accepted events, so its weight must not push the ceiling up.
+                jnp.max(jnp.where(ok, raw_weight, 0.0)),
+                # Weight, not count: this is the share of the cross section the
+                # ceiling cannot sample correctly.  Accepting u * W < w is
+                # exactly min(1, w/W), so a trial below the ceiling is sampled
+                # as w while one above it is over-represented by W/w; the total
+                # weight above the ceiling is therefore the size of the error.
+                jnp.sum(jnp.where(above, jnp.where(ok, weight, 0.0), 0.0)),
             ],
             dtype=jnp.float32,
         )
@@ -714,7 +827,7 @@ class EventGenerator:
         kin = kin if kin is not None else build_kinematics(cfg)
         n = n or max(int(cfg.batch_size), 1 << 16)
         sample = _make_sampler(self.grid, kin, cfg.interp_scheme, n)
-        weights, _ = sample(jax.random.PRNGKey(cfg.seed if cfg.seed is not None else 0))
+        weights = sample(jax.random.PRNGKey(cfg.seed if cfg.seed is not None else 0))
         return float(jnp.max(weights)), float(jnp.mean(weights))
 
     def stream(
@@ -749,6 +862,14 @@ class EventGenerator:
                 "table matches the requested channel and that the kinematic cuts "
                 "are not empty"
             )
+        # A pilot batch only bounds the maximum of the points it actually
+        # contains.  ``accept iff u * W < w`` is exactly ``min(1, w/W)``, so as
+        # long as W exceeds the largest weight in the run the event stream is
+        # distributed as w; a weight that slips over the ceiling instead gets
+        # accepted with probability 1, which biases the sample towards the
+        # heavy tail.  Scaling the pilot estimate gives room for the tail
+        # beyond it, and the running maximum below closes the gap for good.
+        weight_max *= cfg.weight_max_margin
         log.info("weight maximum estimated as %.6g (seed %d)", weight_max, seed)
 
         step = _make_stepper(self.grid, kin, cfg.interp_scheme, batch, chunk)
@@ -759,6 +880,10 @@ class EventGenerator:
         weight_sum = 0.0
         n_sampled = 0
         n_above = 0
+        weight_above = 0.0
+        # sum(acceptances) * ceiling, accumulated per batch with the ceiling
+        # that batch actually used, so it stays exact when the ceiling moves.
+        sampled_weight = 0.0
         weight_max_seen = 0.0
         n_done = 0
         next_report = cfg.verbose_every or 0
@@ -774,6 +899,18 @@ class EventGenerator:
             n_sampled += int(counters[0])
             n_above += int(counters[1])
             weight_max_seen = max(weight_max_seen, float(counters[2]))
+            weight_above += float(counters[3])
+            sampled_weight += int(counters[0]) * weight_max
+            if weight_max_seen > weight_max:
+                # The pilot estimate was short.  Raising the ceiling fixes every
+                # later batch; the batch that found the outlier is already
+                # over-weighted, which is what ``ceiling_bias`` measures.
+                log.warning(
+                    "weight ceiling %.6g was exceeded (%.6g seen); raising it. "
+                    "Increase --weight-max-margin to avoid this.",
+                    weight_max, weight_max_seen,
+                )
+                weight_max = weight_max_seen
             produced = int(write_pos)
             n_done += produced
 
@@ -805,7 +942,7 @@ class EventGenerator:
             if is_last:
                 stats = self._stats(
                     cfg, kin, weight_max, weight_sum, n_trials, n_done, t_start,
-                    n_sampled, n_above, weight_max_seen,
+                    n_sampled, n_above, weight_max_seen, weight_above, sampled_weight,
                 )
             yield block.view(EVENT_DTYPE).reshape(-1), stats
 
@@ -854,6 +991,8 @@ class EventGenerator:
         n_sampled: int = 0,
         n_above: int = 0,
         weight_max_seen: float = 0.0,
+        weight_above: float = 0.0,
+        sampled_weight: float = 0.0,
     ) -> GenerationStats:
         seconds = time.perf_counter() - t_start
         phase_space = (4.0 * PI) ** 2 * 2.0 * PI * float(kin.uq2_range) * float(kin.ep_range)
@@ -868,10 +1007,11 @@ class EventGenerator:
             weight_sum=weight_sum,
             n_sampling_accepted=int(n_sampled),
             n_above_ceiling=int(n_above),
+            ceiling_bias=(weight_above / weight_sum) if weight_sum > 0.0 else 0.0,
             acceptance=acceptance,
             event_yield=n_events / n_trials if n_trials else 0.0,
             sigma_mc=mean_w * phase_space,
-            sigma_accepted=(acceptance * weight_max * phase_space) if n_trials else 0.0,
+            sigma_accepted=(sampled_weight / n_trials * phase_space) if n_trials else 0.0,
             phase_space=phase_space,
             seconds=seconds,
             events_per_second=n_events / seconds if seconds > 0 else 0.0,
