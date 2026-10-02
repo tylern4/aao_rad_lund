@@ -24,13 +24,19 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# One extra, not a PEP 735 group: `pip install -e ".[dev]"` then installs
+# everything needed to run the tests, lint and reproduce the validation plots.
 dev = [
     "pytest>=7.0",
     "pytest-cov",
     "ruff>=0.4",
+    # validation/ only
+    "matplotlib>=3.9",
+    "scipy>=1.11",
 ]
-viz = [
-    "h5py>=3.9",
+# YAML run cards; JSON and TOML are read without a parser.
+yaml = [
+    "pyyaml>=6.0",
 ]
 
 [project.scripts]
