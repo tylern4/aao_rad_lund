@@ -11,17 +11,16 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from conftest import requires_tables
 
 from aao_rad.table import (
     PADDING_COLUMNS,
     TABLE_FORMAT_VERSION,
-    converted_path_for,
     convert_table,
+    converted_path_for,
     load_table,
     load_table_npz,
 )
-
-from conftest import requires_tables
 
 REPO = Path(__file__).resolve().parent.parent
 REFERENCE_DUMP = REPO / "validation" / "fortran_table.npz"

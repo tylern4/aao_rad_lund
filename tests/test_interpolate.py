@@ -12,6 +12,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from conftest import requires_tables
 
 from aao_rad.interpolate import (
     InterpolationGrid,
@@ -20,8 +21,6 @@ from aao_rad.interpolate import (
     natural_spline_2nd_derivs,
     spline_tensor,
 )
-
-from conftest import requires_tables
 
 SCHEMES = ["linear", "spline"]
 

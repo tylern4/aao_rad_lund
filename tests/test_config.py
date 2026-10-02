@@ -58,7 +58,7 @@ class TestValidation:
 
     def test_frozen(self):
         cfg = GeneratorConfig()
-        with pytest.raises(Exception):
+        with pytest.raises(AttributeError):
             cfg.beam_energy = 9.0  # type: ignore[misc]
 
     def test_ek_sampling_choices(self):
