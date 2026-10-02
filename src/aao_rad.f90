@@ -99,6 +99,8 @@ program aaorad_gen
    real sigr, sig_ratio
    real sigr_max
    real sigr1
+   real sigr_raw            ! validation dump: sigma() before the phase-space factors
+   real soft_ek             ! validation dump: photon energy used by sigma()
    real*8 sig_tot, sig_sum
    real sigt
    real sigu
@@ -149,6 +151,10 @@ program aaorad_gen
    !ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
    integer*4 idum
    integer*4 ntries
+   ! ---- validation instrumentation (not part of the original) ----
+   ! ngeom counts trials that survived every geometric cut and drew a photon;
+   ! tdump is the stride for the trial-level measure dump on unit 14.
+   integer*4 ngeom, tdump
 
    real cfac, asig
 
@@ -186,6 +192,8 @@ program aaorad_gen
    DATA MEL  /.511E-3/
 
    data file_out /'aao_rad.lund'/
+   character*17 file_ntp
+   data file_ntp /'aao_rad.ntuple'/
    !data file_sum /'aao_rad.sum'/
    data ctime    /'                            '/
 
@@ -379,6 +387,8 @@ program aaorad_gen
 
    nevent = 0
    ntries = 0
+   ngeom = 0
+   tdump = 97
    sig_int = 0.
    sig_tot = 0.
 
@@ -391,6 +401,17 @@ program aaorad_gen
 
    lrecl = 1024
    open(unit = 12, file = file_out)
+
+   !     validation dump of the full 32-variable n-tuple (see write(13,*) below)
+
+   open(unit = 13, file = file_ntp)
+
+   !      validation dump of the sampled trial measure (see the write(14,...)
+   !      just after the missing-mass test).  One row per 1-in-tdump trial that
+   !      reached the weight stage, so it can be compared against the port's own
+   !      trials without any importance sampling in the way.
+
+   open(unit = 14, file = 'aao_rad.trials')
    !      write(12,*)' AO Calculation of Single Pion Production'
    !      write(12,*)' Starting time:', ctime
    !      write(12,*)' Epirea (1 for pi0, 3 for pi+) =',epirea
@@ -882,10 +903,17 @@ program aaorad_gen
 
    endif
 
+   ! ---- validation instrumentation (not part of the original) ----
+   ! A trial has now survived every geometric cut and the photon has been
+   ! drawn, so es/q2/ep/ek/cstk/phik/intreg/mcfac/mpfac are all current.
+   ngeom = ngeom + 1
+
    sdotk = es * ek - ps * ek * cstk * csths - ps * ek * sntk * snths * cos(phik)
    pdotk = ep * ek - pp * ek * cstk * csthp - pp * ek * sntk * snthp * cos(phik)
 
-   sigr = sigma(ek, Tk, csthcm, phicm, ehel)
+   sigr_raw = sigma(ek, Tk, csthcm, phicm, ehel)
+   sigr = sigr_raw
+   soft_ek = ek
 
    if (sigr .le. 0.) go to 20
 
@@ -904,6 +932,22 @@ program aaorad_gen
    sigr = mcfac * mpfac * sigr
    sig_ratio = sigr / sigr_max
    sig_tot = sig_tot + sigr
+
+   ! ---- validation instrumentation (not part of the original) ----
+   ! Dump the *trial* measure, not the accepted-event one: every 1-in-tdump
+   ! trial that reached the weight stage contributes one row with the sampled
+   ! variables and the full weight.  Comparing this against the port's own
+   ! trial sample separates a sampling-density difference from a cross-section
+   ! difference, which the accepted-event n-tuple cannot do on its own.
+   !
+   ! mm2 and wreal are appended (columns 11 and 12) because the surviving mm2
+   ! distribution is the *only* way to see whether the port's missing-mass cut
+   ! selects the same ek window: the cut acts on ek through mm2, so a shifted or
+   ! narrowed window shows up as a shifted survivor distribution even though the
+   ! cut itself never appears in any accepted-event column.
+   if (mod(ntries, tdump) .eq. 0) &
+      write(14, '(12(1x,es16.8))') es, q2, ep, ek, cstk, phik, &
+      real(intreg), mcfac, mpfac, sigr, mm2, wreal
 
    !     Choose the number of times, mcall, to call the routine used
    !     to calculate kinematic quantities for the n-tuple.
@@ -1010,6 +1054,15 @@ program aaorad_gen
       ntp(30) = qsq
       ntp(31) = ehel
       ntp(32) = asym_p
+
+      ! ---- validation dump (not part of the original) ----
+      ! The rz/LUND writer only ever emits two tracks, so most of the n-tuple
+      ! cannot be recovered from aao_rad.lund.  Mirror the full record here so
+      ! validation/ can compare every observable against the Python port.
+      write(13, '(50(1x,es16.8))') (ntp(i), i = 1, 32), &
+         sigr, sigr_max, real(ntries), real(mcall), &
+         sigr_raw, soft_ek, cstk, csthcm, phicm, phik, real(ehel), &
+         es, ep, qsq, epw
 
       nevent = nevent + 1
 
@@ -1132,6 +1185,9 @@ program aaorad_gen
          , sig_int, sig_sum, ' mu-barns'
       write(6, *)' Beam time at Lum=1.0E34 =', events / sig_sum * 1.E-4&
          , ' seconds'
+      ! ---- validation instrumentation: geometric acceptance, so the port's
+      ! sampling measure can be checked against this one directly.
+      write(6, *)' ntries, ngeom =', ntries, ngeom
       ntold = ntold + 1
 
    endif
@@ -1149,6 +1205,8 @@ program aaorad_gen
    !      call hrend('aaoradgen')
 
    close(12)
+   close(13)
+   close(14)
 
    !open(unit = 14, file = file_sum)
 
