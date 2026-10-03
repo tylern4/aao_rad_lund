@@ -73,7 +73,9 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=false
 GPUS=4
 "$PY" "$HERE/make_grid.py" --root "$ROOT"
 
-# One process per GPU, each restricted to a quarter of the host cores so the
-# four processes do not oversubscribe the node's threads.
+# One process per GPU, each restricted to an equal share of the node's affinity
+# entries so the four processes do not oversubscribe it.  nproc is the right
+# divisor here (unlike in run_fortran.sbatch) precisely because we want to split
+# every hardware thread between the jobs, not to give each job its own cores.
 "$PY" "$HERE/run_batch.py" --code py_gpu --root "$ROOT" --repo "$REPO" \
   --python "$PY" --gpus "$GPUS" --jobs "$GPUS" --cpus-per-job "$(( $(nproc) / GPUS ))"

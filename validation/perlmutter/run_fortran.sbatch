@@ -79,9 +79,16 @@ fi
 # the event n-tuple is still written -- both handled by run_batch.py.
 #
 # The original is serial Fortran (no OpenMP), so one process per core is the
-# only way to fill the node: 128 single-core workers.
+# only way to fill the node.  The worker count has to be the number of *cores*,
+# not of affinity entries: `nproc` reports 256 on a --cpus-per-task=128 PM-CPU
+# node, because the mask carries one entry per hardware thread, and 256
+# single-core workers would put two processes on each of the 128 cores, halving
+# the throughput this layout exists to get.  Slurm sets SLURM_CPUS_PER_TASK to
+# the core count it allocated, which is what we want; nproc is only a fallback.
+CORES=${SLURM_CPUS_PER_TASK:-$(nproc)}
+echo "fortran: $CORES workers, one core each (affinity $(nproc) threads)"
 "$PY" "$HERE/run_batch.py" --code fortran --root "$ROOT" --repo "$REPO" \
-  --jobs "$(nproc)" --cpus-per-job 1
+  --jobs "$CORES" --cpus-per-job 1
 
 # The Fortran seeds myran from unixtime (1 s resolution): guard against two
 # runs of one configuration starting in the same second.

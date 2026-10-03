@@ -82,8 +82,8 @@ each one a slice of the allocation (XLA sizes its thread pool from
 | arm | layout | reason |
 |---|---|---|
 | fortran | 128 processes × 1 core | the original is serial Fortran with no OpenMP, so a core is all a run can use |
-| py_cpu | 1 process × the whole node | one copy of the tables, one compilation cache, no duplicated runtimes |
-| py_gpu | 4 processes × 32 cores | one per A100, with a quarter of the host cores each |
+| py_cpu | 128 processes × 2 cores | measured: threads scale to only ~4×, so many processes beat one wide one |
+| py_gpu | 4 processes × 32 threads | one per A100, splitting the node's affinity entries evenly |
 
 `calibrate.sbatch` measures the CPU choice rather than assuming it: it times one
 real run at 1, 2, 4 … 128 threads and projects the wall time of every candidate
@@ -101,6 +101,19 @@ appended to `$SCRATCH/aao_rad_scan/calib_results.txt` as it finishes and the
 projection reads that file, so a job killed by its wall clock still leaves usable
 numbers.  A label that exceeds `AAO_CALIB_LABEL_TIMEOUT` (600 s) is recorded as
 `TIMEOUT` and dropped rather than guessed at.
+
+Measured on `nid004960`, one PM-CPU node, 128 cores / 256 threads:
+
+| threads | 1 | 2 | 4 | 8 | 16 | 32 | 64 | 128 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 300-event run (s) | 35.0 | 28.8 | 20.2 | 13.9 | 10.6 | 8.9 | 8.4 | 8.7 |
+| speedup vs 1 thread | 1.0× | 1.2× | 1.7× | 2.5× | 3.3× | 3.9× | 4.2× | 4.0× |
+
+Scaling flattens out around 4×, so the grid wants many narrow processes rather
+than one wide one: 128 × 2 projects to 64 min for all 192 runs, against 31 hours
+for a single process on the whole node.  `run_py_cpu.sbatch` therefore defaults to
+`AAO_CPU_JOBS=128 AAO_CPU_CPUS=2`; a different node or a changed grid wants those
+two numbers re-derived rather than carried over.
 
 ## Layout on `$SCRATCH`
 
