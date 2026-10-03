@@ -374,12 +374,43 @@ noise floor of `1.36 * sqrt(1/200000 + 1/8000) = 0.0154`:
 Thirteen of the sixteen sit at or below the floor. The three that do not are
 `mm^2` at 2.3x and `asym_p` at 1.6x — both unexplained, both small, and
 `asym_p` at least does not enter the weight, so neither can account for the
-cross-section residual above. `validation/distributions_bins.csv` has the
-per-bin breakdown for each; the `outside` column in it is worth checking before
-trusting any single observable, since a mis-set plot range silently drops
-events. That is not hypothetical: `phi_k` was initially plotted over
-`[-30, 390]` when it spans `[-180, 180]`, which discarded 31.5% of events while
-the histogram still looked plausible. `E_s` is the third and is degenerate.
+cross-section residual above. `E_s` is the third and is degenerate.
+
+Per bin (40 bins each), which is the stricter test — a KS distance can hide a
+compensating pair of errors that per-bin pulls cannot:
+
+| observable | bins > 3σ | max abs z | ratio p05 / p50 / p95 |
+|---|---|---|---|
+| `phi*` | 0/40 | 2.33 | 0.900 / 0.996 / 1.156 |
+| `cos(theta*)` | 0/40 | 2.02 | 0.889 / 1.009 / 1.176 |
+| `Q^2` | 0/40 | 1.96 | 0.858 / 0.996 / 1.122 |
+| `theta_e` | 0/40 | 1.86 | 0.849 / 0.999 / 1.072 |
+| `cos(theta_k)` | 0/40 | 2.50 | 0.897 / 0.998 / 1.146 |
+| `phi_k` | 0/40 | 2.69 | 0.893 / 0.993 / 1.121 |
+| `W` | 0/40 | 2.26 | 0.827 / 1.002 / 1.484 |
+| `E_gamma` | 1/40 | 3.08 | 0.296 / 1.025 / 2.672 |
+| `mm^2` | 1/40 | 3.79 | 0.900 / 1.049 / 1.267 |
+| `W_real` | 0/40 | 2.73 | 0.807 / 0.981 / 1.226 |
+| `E_pion` | 0/40 | 2.76 | 0.848 / 1.000 / 1.281 |
+| `asym_p` | **5/40** | **5.30** | 0.153 / **0.709** / 1.059 |
+
+`phi*` is the one to look at: it was 12 of 12 bins over 3σ with max abs z = 59
+and a median ratio of 0.761 before the key fix, and is now indistinguishable.
+That is the visible symptom of the bug described below.
+
+`asym_p` is the real remaining outlier — a 29% median offset across 5 bins at
+up to 5.3σ. It is output-only, so it cannot touch the cross section, but it
+should agree and does not.
+
+`ref-empty` bins in `validation/distributions_bins.csv` are a binning artifact
+for the two concentrated observables, not a disagreement: `E_gamma` has a mean
+of 0.014 GeV in a range plotted over 0.6, and `E_s` puts 97% of its events in a
+`1e-4` GeV window, so uniform bins leave the dense region nearly empty in an
+8000-event reference. The `outside` column is worth checking before trusting
+any single observable, since a mis-set plot range silently drops events. That
+is not hypothetical: `phi_k` was initially plotted over `[-30, 390]` when it
+spans `[-180, 180]`, which discarded 31.5% of events while the histogram still
+looked plausible.
 
 `E_s` at D = 0.95 is a degenerate comparison, not a 95% discrepancy. The beam
 energy loss is sampled as `xs**(1/targs)` with `targs` in radiation lengths
@@ -400,9 +431,18 @@ The one substantive lesson from this comparison is in the next section.
   Fortran runs 0.72% apart bracket the residual being measured. A single long
   reference run (or several) settles it; nothing on the port side needs
   changing.
-- **`mm^2` (2.3x floor) and `asym_p` (1.6x floor)** are unexplained shape
-  differences. `asym_p` is output-only, so it cannot affect the cross section,
-  but it should still agree.
+- **`asym_p`** is the one real remaining disagreement: a 29% median offset
+  across per-bin ratios, 5 bins at up to 5.3σ. It is output-only and cannot
+  affect the cross section, but it should agree and does not.
+- **`mm^2`** sits at 2.3x the KS floor and 1 bin at 3.8σ. It is the same
+  quantity on both sides — the cut is applied to the pre-exit electron energy
+  but the recorded column comes from the final state, which uses the post-exit
+  one, and the Fortran does exactly the same (it updates `ep` at
+  `aao_rad.f90:1003` and only then calls `missm` again at `:1014`) — and the two
+  means agree to 0.1%. The port's recorded maximum reaches 1.111 where the
+  reference stops at 1.080 because the `eloss`-driven overshoot past the cut
+  ceiling affects about one event in 10^4-10^5, and the port sample is five
+  times larger.
 - **Event-by-event comparison is impossible.** `myran` seeds from `unixtime`,
   so two Fortran runs disagree with each other. Everything above is
   distributional as a result.
@@ -425,10 +465,12 @@ phicm_deg = 360.0 * u(k_cm)      # same key as csthcm
 direction to a curve on the sphere instead of covering it.
 
 The instructive part is how well it hid. Both marginals stay perfectly uniform
-under the constraint, so neither histogram moved; `phi*`'s per-bin shape only
-went from "12 of 12 bins over 3 sigma" to "5 of 40". Nothing in the
-cross section was visibly wrong either, because the two errors cancelled: the
-survivor fraction came out +2.2% and the mean weight −1.6%, for a net +0.6%.
+under the constraint, so neither histogram moved: `phi*`'s KS distance was 0.26
+before the fix and 0.0133 after, but that is the *aggregate*, and the
+cross-section residual stayed at +0.6% throughout because the two errors
+cancelled — the survivor fraction came out +2.2% and the mean weight −1.6%.
+The per-bin view is what separates it: 12 of 12 bins over 3σ at max abs z = 59
+before, 0 of 40 at max abs z = 2.3 after.
 
 What did expose it was plotting the photon-energy acceptance profile
 `A(ek)` (`validation/compare_mm2.py`). Sharing the key correlates the decay
@@ -464,7 +506,10 @@ Deliberate, and each one is a config option you can turn off:
 - **Branch-free rejection.** The original's `go to` chain becomes masks, so a
   rejected trial occupies a slot rather than being redrawn in place. This
   changes throughput, not the sampled distribution.
-- **Estimated acceptance ceiling.** `sigr_max` is gone.
+- **Estimated acceptance ceiling.** `sigr_max` is gone. The ceiling is
+  estimated from a pilot batch, scaled by `--weight-max-margin`, and raised
+  again if a later batch exceeds it. See
+  [Performance and tuning](#performance-and-tuning).
 - **Table cache.** `.tbl` parsed once into `.npz`.
 - **`spence` in float64.** The Fortran's is a 100-step Riemann sum in float32,
   which is not reproducible in float64 and not worth reproducing.
