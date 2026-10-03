@@ -30,14 +30,17 @@ set -euo pipefail
 # script, and the job runs with $HOME=/global/homes/t/tylern but a working
 # directory of /global/u1/t/tylern.  Deriving REPO from either gives a directory
 # with no src/ in it, and every run then dies with ModuleNotFoundError.  Try the
-# plausible anchors and accept the first that really is this repository.
+# plausible anchors and accept the first that really is this repository.  The
+# test is for src/aao_rad, not parms/: parms/ is gitignored and only exists after
+# submit_all.sh unpacks parms.tar.gz, so requiring it would reject a perfectly
+# good checkout on a fresh clone.
 REPO=""
 for cand in "${AAO_REPO:-}" \
             "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/../.." \
             "${SLURM_SUBMIT_DIR:-}" \
             "${SCRATCH:-}/aao_rad_lund" \
             "$PWD/aao_rad_lund"; do
-  if [ -n "$cand" ] && [ -f "$cand/pyproject.toml" ] && [ -d "$cand/parms" ]; then
+  if [ -n "$cand" ] && [ -f "$cand/pyproject.toml" ] && [ -d "$cand/src/aao_rad" ]; then
     REPO=$(cd "$cand" && pwd)
     break
   fi

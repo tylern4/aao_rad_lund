@@ -56,7 +56,20 @@ print(f"venv ok: python {sys.version.split()[0]}, jax {jax.__version__}")
 EOF
 fi
 
-# 2. the Fortran binary, with the repo's own Makefile (gfortran).  gcc-native is
+# 2. the MAID tables.  parms/ is gitignored -- 241 MB of tables that ship as
+#    parms.tar.gz -- so a fresh clone has no parms/ at all.  Both codes need it:
+#    the Fortran opens the tables relative to its working directory, and the port
+#    is handed --parms.  Unpacking is idempotent and takes a few seconds.
+if [ ! -d "$REPO/parms/spp_tbl" ]; then
+  echo "== unpacking MAID tables (parms.tar.gz -> parms/, 241 MB)"
+  tar -xzf "$REPO/parms.tar.gz" -C "$REPO"
+fi
+[ -d "$REPO/parms/spp_tbl" ] || {
+  echo "parms/spp_tbl still missing after unpacking parms.tar.gz" >&2
+  exit 1
+}
+
+# 3. the Fortran binary, with the repo's own Makefile (gfortran).  gcc-native is
 #    on the default PATH on the login and compute nodes; `module load gcc`
 #    actually *fails* there, so it is only a fallback.
 if [ ! -x "$REPO/bin/aao_rad_lund" ]; then
@@ -69,10 +82,10 @@ if [ ! -x "$REPO/bin/aao_rad_lund" ]; then
   make -C "$REPO"
 fi
 
-# 3. the scan grid: 96 configurations x 2 seeds (pure stdlib).
+# 4. the scan grid: 96 configurations x 2 seeds (pure stdlib).
 "$PYBIN" "$HERE/make_grid.py" --root "$ROOT"
 
-# 4. the three arms run in parallel; verification runs after all of them.
+# 5. the three arms run in parallel; verification runs after all of them.
 sub() { sbatch --account="$AAO_ACCOUNT" "$@"; }
 FORT=$(sub -o "$ROOT/logs/fortran_%j.out" "$HERE/run_fortran.sbatch" | awk '{print $4}')
 CPU=$(sub -o "$ROOT/logs/py_cpu_%j.out" "$HERE/run_py_cpu.sbatch" | awk '{print $4}')
