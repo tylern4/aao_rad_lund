@@ -21,16 +21,18 @@
 #SBATCH --time=2-00:00:00
 
 set -euo pipefail
-# Locate the checkout.  $0 is not the script's own path when the job arrives
-# through the nersc API -- that runs the script with a working directory of $HOME
-# -- so deriving REPO from it silently yields a directory with no src/ in it and
-# every run then fails with ModuleNotFoundError.  Take the first candidate that
-# actually looks like this repository instead.
+# Locate the checkout.  Neither $0 nor $HOME works when the job arrives through
+# the nersc API: Slurm is handed /var/spool/slurmd/job<id>/slurm_script as the
+# script, and the job runs with $HOME=/global/homes/t/tylern but a working
+# directory of /global/u1/t/tylern.  Deriving REPO from either gives a directory
+# with no src/ in it, and every run then dies with ModuleNotFoundError.  Try the
+# plausible anchors and accept the first that really is this repository.
 REPO=""
 for cand in "${AAO_REPO:-}" \
             "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/../.." \
             "${SLURM_SUBMIT_DIR:-}" \
-            "$HOME/aao_rad_lund"; do
+            "${SCRATCH:-}/aao_rad_lund" \
+            "$PWD/aao_rad_lund"; do
   if [ -n "$cand" ] && [ -f "$cand/pyproject.toml" ] && [ -d "$cand/parms" ]; then
     REPO=$(cd "$cand" && pwd)
     break
