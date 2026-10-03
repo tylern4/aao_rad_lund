@@ -160,7 +160,11 @@ def build_job(
     env["PYTHONPATH"] = os.pathsep.join(
         [str(repo / "src"), env["PYTHONPATH"]] if env.get("PYTHONPATH") else [str(repo / "src")]
     )
-    env["OMP_NUM_THREADS"] = "1"
+    # Only a worker that was not given a slice of the allocation should use the
+    # threads the sbatch script sized; a pinned worker keeps one thread, since its
+    # taskset mask is what bounds it.  XLA reads its pool size from the affinity
+    # mask, so this is belt and braces for the OpenMP-backed pieces.
+    env["OMP_NUM_THREADS"] = "1" if cpus_per_job else env.get("OMP_NUM_THREADS", "1")
     if gpus:
         vis = os.environ.get("CUDA_VISIBLE_DEVICES", "")
         devices = vis.split(",") if vis else [str(i) for i in range(gpus)]

@@ -4,19 +4,42 @@
 # host side of the work.
 #
 # Needs the venv built by submit_all.sh (jax[cuda12]).
+#
+# A PM-GPU node has 64 cores / 128 threads and 4 A100s, and Slurm counts cores
+# here: asking for all 4 GPUs means the whole node, so 64 cores is the matching
+# request.  (A PM-CPU node is 128 cores / 256 threads, which is why the CPU arms
+# ask for 128.)
 #SBATCH --job-name=aao_py_gpu
 #SBATCH --account=m3792
-#SBATCH --output=slurm_%j.out
+#SBATCH --output=/global/u1/t/tylern/aao_%j.out
 #SBATCH --constraint=gpu
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=32
+#SBATCH --cpus-per-task=64
 #SBATCH --gpus=4
 #SBATCH --time=12:00:00
 
 set -euo pipefail
-HERE=$(cd "$(dirname "$0")" && pwd)
-REPO=$(cd "$HERE/../.." && pwd)
+# Locate the checkout.  $0 is not the script's own path when the job arrives
+# through the nersc API -- that runs the script with a working directory of $HOME
+# -- so deriving REPO from it silently yields a directory with no src/ in it and
+# every run then fails with ModuleNotFoundError.  Take the first candidate that
+# actually looks like this repository instead.
+REPO=""
+for cand in "${AAO_REPO:-}" \
+            "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/../.." \
+            "${SLURM_SUBMIT_DIR:-}" \
+            "$HOME/aao_rad_lund"; do
+  if [ -n "$cand" ] && [ -f "$cand/pyproject.toml" ] && [ -d "$cand/parms" ]; then
+    REPO=$(cd "$cand" && pwd)
+    break
+  fi
+done
+if [ -z "$REPO" ]; then
+  echo "cannot find the aao_rad_lund checkout -- set AAO_REPO" >&2
+  exit 1
+fi
+HERE="$REPO/validation/perlmutter"
 ROOT=${AAO_SCAN_ROOT:-${SCRATCH:?SCRATCH is not set}/aao_rad_scan}
 PY=${AAO_PYTHON:-${AAO_VENV:-$SCRATCH/aao_venv}/bin/python}
 mkdir -p "$ROOT/logs"
