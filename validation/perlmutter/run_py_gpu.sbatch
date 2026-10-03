@@ -9,6 +9,11 @@
 # here: asking for all 4 GPUs means the whole node, so 64 cores is the matching
 # request.  (A PM-CPU node is 128 cores / 256 threads, which is why the CPU arms
 # ask for 128.)
+
+# Account m3792's default path lands in the `debug` QoS, whose wall limit is 30
+# minutes -- too short for a 192-run arm.  `shared` allows 2 days on one node,
+# which is what these jobs need; AAO_QOS overrides it.
+#SBATCH --qos=shared
 #SBATCH --job-name=aao_py_gpu
 #SBATCH --account=m3792
 #SBATCH --output=/global/u1/t/tylern/aao_%j.out
@@ -17,7 +22,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=64
 #SBATCH --gpus=4
-#SBATCH --time=12:00:00
+#SBATCH --time=2-00:00:00
 
 set -euo pipefail
 # Locate the checkout.  $0 is not the script's own path when the job arrives
