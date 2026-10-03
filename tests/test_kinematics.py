@@ -445,3 +445,109 @@ class TestPhotonDecayAngles:
                 f"decile {d} of cos(theta*): mean phi* = {m.mean():.2f} deg, "
                 f"{z:.1f} sigma from 180"
             )
+
+
+class TestBeamAsymmetryBranch:
+    """``asym_p`` must use the ``W`` that belongs to its own photon branch.
+
+    The original computes the single-spin asymmetry twice, and at two different
+    hadronic masses.  The soft branch (``aao_rad.f90:790``) calls ``dsigma``
+    with the driver's ``epw``, built from ``es`` and ``ep`` alone.  The
+    radiative branch never reaches that call in the caller at all: it goes
+    through ``sigma()``, which recomputes ``mf2 = uu - 2*ek*(u0 - pu*cstk)``
+    and passes ``epw = sqrt(mf2)`` -- a different mass, smaller by the radiated
+    energy.
+
+    The two disagree by ~17% in the median here, which is why the port keeps
+    both evaluations rather than sharing one.  It is also exactly where the
+    original went wrong: ``asym_p`` was a *local* of ``sigma()``, so the value
+    ``dsigma`` computed for the radiative branch died with the call and
+    ``ntp(32)`` recorded the last soft *trial*'s asymmetry instead of the
+    event's own -- 24% of the n-tuple carried an unrelated value, which is what
+    the reference ``asym_p`` comparison flagged.
+    """
+
+    N = 60_000
+
+    @pytest.fixture(scope="class")
+    def points(self, small_config):
+        from aao_rad.generate import build_grid, build_kinematics, draw_kinematics, draw_photon
+
+        grid = build_grid(small_config.channel, parms_dir="parms",
+                          scheme=small_config.interp_scheme)
+        kin = build_kinematics(small_config)
+        key = jax.random.PRNGKey(5150)
+        kv = draw_kinematics(key, kin, self.N)
+        ph = draw_photon(jax.random.fold_in(key, 1), kin, kv, self.N)
+        return grid, kin, kv, ph
+
+    @staticmethod
+    def _expected(grid, kin, kv, ph, radiative):
+        """``response_functions`` at the mass this branch uses, plus its validity.
+
+        Returns ``(asym, defined)``.  ``defined`` is the branch's own
+        ``sigma() .le. 0.`` guard -- below-threshold trials evaluate the
+        response at ``W = 0``, where it divides by zero, and are rejected by
+        the generator regardless.
+        """
+        from aao_rad.motsa import _epsilon
+        from aao_rad.xsection import response_functions
+
+        es, ep, cst0 = kv["es"], kv["ep"], kv["cst0"]
+        ek, cstk, e_hel = ph["ek"], ph["cstk"], ph["e_hel"]
+
+        if radiative:
+            qq = (
+                2.0 * M_E**2 - 2.0 * es * ep + 2.0 * kv["ps"] * kv["pp"] * cst0
+                - 2.0 * ek * (es - ep) + 2.0 * ek * kv["pu"] * cstk
+            )
+            mf2 = kv["uu"] - 2.0 * ek * (kv["u0"] - kv["pu"] * cstk)
+            w_sq, q2 = jnp.maximum(mf2, 0.0), -qq
+            defined = (mf2 > kin.wg**2) & (qq < 0.0)
+        else:
+            w_sq, q2 = kv["w_sq"], kv["q2"]
+            defined = w_sq > 0.0
+
+        nu = (w_sq - M_N**2 + q2) / (2.0 * M_N)
+        resp = response_functions(
+            grid, q2, jnp.sqrt(w_sq), ph["csthcm"], ph["phicm_deg"] * (np.pi / 180.0),
+            _epsilon(es, ep, cst0, nu, q2), e_hel.astype(jnp.float32), kin.m_pi,
+        )
+        return np.asarray(resp.asym_p), np.asarray(defined)
+
+    @pytest.mark.parametrize("radiative", [False, True])
+    def test_asym_uses_the_branch_mass(self, points, small_config, radiative):
+        from aao_rad.generate import integrand
+
+        grid, kin, kv, ph = points
+        got = np.asarray(integrand(grid, kin, kv, ph, small_config.interp_scheme).asym)
+        want, defined = self._expected(grid, kin, kv, ph, radiative)
+        other, _ = self._expected(grid, kin, kv, ph, not radiative)
+
+        ek = np.asarray(ph["ek"])
+        ok = defined & (ek >= kin.delta if radiative else ek < kin.delta)
+        assert ok.sum() > 1000, f"only {int(ok.sum())} usable trials in this branch"
+        assert np.abs(got[ok] - want[ok]).max() < 1e-5
+        # The other branch's mass must be a genuinely different answer, or this
+        # test would pass even if the branch selection were dropped.
+        assert np.abs(other[ok] - want[ok]).max() > 1e-3
+
+    def test_asym_is_this_events_own(self, points, small_config):
+        """``asym_p`` must not repeat across events the way the original's did.
+
+        In the broken reference the radiative rows carry the asymmetry of the
+        last soft *trial*, so most radiative values were duplicates of some
+        earlier row's.  A correct implementation produces a continuous spread,
+        which is what a run of exactly-equal neighbours would rule out.
+        """
+        from aao_rad.generate import integrand
+
+        grid, kin, kv, ph = points
+        asym = np.asarray(integrand(grid, kin, kv, ph, small_config.interp_scheme).asym)
+        rad = (np.asarray(ph["ek"]) >= kin.delta) & np.isfinite(asym)
+        a = asym[rad]
+        n_uniq = np.unique(a).size
+        assert n_uniq / a.size > 0.99, (
+            f"only {n_uniq} distinct asym_p in {a.size} radiative trials -- "
+            "the value is being carried over from somewhere else"
+        )

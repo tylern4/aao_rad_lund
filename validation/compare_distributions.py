@@ -477,7 +477,7 @@ def main() -> int:
 
     if not args.fortran.exists():
         raise SystemExit(f"{args.fortran} not found -- run aao_rad with the "
-                         "instrumented source first (see validation/README.md)")
+                         "instrumented source first (see the Validation section of README.md)")
     if not args.run_card.exists():
         raise SystemExit(f"{args.run_card} not found -- the run card is needed so "
                          "both generators cover the same window")

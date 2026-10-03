@@ -105,6 +105,7 @@ program aaorad_gen
    real sigt
    real sigu
    real sigip, asym_p
+   common /radasy/ asym_p
    real sntk
    real sp
    real spence
@@ -193,6 +194,8 @@ program aaorad_gen
 
    data file_out /'aao_rad.lund'/
    character*17 file_ntp
+   character*32 trienv
+   logical trials_wanted
    data file_ntp /'aao_rad.ntuple'/
    !data file_sum /'aao_rad.sum'/
    data ctime    /'                            '/
@@ -410,8 +413,21 @@ program aaorad_gen
    !      just after the missing-mass test).  One row per 1-in-tdump trial that
    !      reached the weight stage, so it can be compared against the port's own
    !      trials without any importance sampling in the way.
+   !
+   !      It is one row in 97 of the surviving trials -- roughly 0.5 GB per
+   !      8000-event run -- and formatting it costs about as much wall time as
+   !      the physics.  Set AAO_TRIALS=0 to switch it off when only the event
+   !      n-tuple (unit 13) is wanted, e.g. for the long runs that pin down the
+   !      cross section.  Default is on, so an unconfigured run behaves exactly
+   !      as before.  Nothing here touches the random sequence.
 
-   open(unit = 14, file = 'aao_rad.trials')
+   call getenv('AAO_TRIALS', trienv)
+   if (trienv .eq. '0') then
+      trials_wanted = .false.
+   else
+      trials_wanted = .true.
+      open(unit = 14, file = 'aao_rad.trials')
+   endif
    !      write(12,*)' AO Calculation of Single Pion Production'
    !      write(12,*)' Starting time:', ctime
    !      write(12,*)' Epirea (1 for pi0, 3 for pi+) =',epirea
@@ -784,7 +800,9 @@ program aaorad_gen
       intreg = 6
 
       !      print *, th0,qsq,epw,csthcm,phicm
-      !     calculate the non-radiative cross section
+      !     calculate the non-radiative cross section.  asym_p is the driver's
+      !     COMMON /radasy/ variable, shared with sigma() so that the radiative
+      !     branch below records this event's own asymmetry too.
 
       call dsigma(th0, qsq, epw, csthcm, phicm, th_opt, epirea, res_opt, sigma0&
          , sigu, sigt, sigl, sigi, sigip, asym_p, ehel)
@@ -945,9 +963,11 @@ program aaorad_gen
    ! selects the same ek window: the cut acts on ek through mm2, so a shifted or
    ! narrowed window shows up as a shifted survivor distribution even though the
    ! cut itself never appears in any accepted-event column.
-   if (mod(ntries, tdump) .eq. 0) &
-      write(14, '(12(1x,es16.8))') es, q2, ep, ek, cstk, phik, &
-      real(intreg), mcfac, mpfac, sigr, mm2, wreal
+   if (trials_wanted) then
+      if (mod(ntries, tdump) .eq. 0) &
+         write(14, '(12(1x,es16.8))') es, q2, ep, ek, cstk, phik, &
+         real(intreg), mcfac, mpfac, sigr, mm2, wreal
+   endif
 
    !     Choose the number of times, mcall, to call the routine used
    !     to calculate kinematic quantities for the n-tuple.
@@ -1206,7 +1226,7 @@ program aaorad_gen
 
    close(12)
    close(13)
-   close(14)
+   if (trials_wanted) close(14)
 
    !open(unit = 14, file = file_sum)
 
@@ -1252,6 +1272,15 @@ real function sigma(ek, Tk, epcos, epphi, ehel)
 
    !     The Mo and Tsai cross section for the 3-3 resonance is replaced with
    !     the AO cross section for single pion production from the proton.
+   !
+   !     BUG FIX (not in the original): asym_p used to be a local of this
+   !     function, so the dsigma call below wrote a value that died with the
+   !     call and the caller's ntp(32) kept whatever the last soft trial had
+   !     left behind -- for every ek >= delta event, i.e. 24% of them, the
+   !     n-tuple carried an unrelated trial's asymmetry.  It is now the
+   !     COMMON /radasy/ variable the driver records, so the radiative branch
+   !     reports this event's own asymmetry.  The value itself is unchanged:
+   !     dsigma already computed it, it was just being thrown away.
 
    implicit none
    COMMON/ALPHA/ ALPHA, PI, MP, MPI, MEL, WG, EPIREA, TH_OPT, RES_OPT
@@ -1272,12 +1301,22 @@ real function sigma(ek, Tk, epcos, epphi, ehel)
    real nu
    !     arguments for aaosub_1:
    real*4 qsq, epw, th0, sigma0, sigu, sigt, sigl, sigi
-   real*4 sigip, asym_p
+   real*4 sigip
+   real*4 asym_p
+   common /radasy/ asym_p
    real epcos, epphi
    real*4 q0, kfac
    real s2, epeps
    integer epirea, th_opt, res_opt
    integer ehel
+   !
+   !     Define the shared asym_p up front.  Three of the early returns below
+   !     (mf2 below threshold, ffac <= 0, gfac <= 0) happen before dsigma would
+   !     have set it; without this they would leave the previous trial's value in
+   !     the driver's COMMON and put it in the n-tuple.  Those paths carry the
+   !     sentinel cross section 0.1e-30, so no meaningful asymmetry exists for
+   !     them and zero is the honest answer.
+   asym_p = 0.0
    !
    th0 = T0
    csthk = cos(Tk)

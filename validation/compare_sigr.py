@@ -36,7 +36,7 @@ variable separately and reports, per bin, the ratio and that bin's share of the
 total signed discrepancy.  The share column is what says where to look.
 
 Requires the instrumented Fortran run that produces ``aao_rad.trials``
-(see ``validation/README.md``).
+(see the Validation section of ``README.md``).
 """
 
 from __future__ import annotations
@@ -209,7 +209,7 @@ def main() -> int:
 
     if not args.trials.exists():
         print(f"{args.trials} not found; run the instrumented aao_rad first "
-              f"(see validation/README.md)", file=sys.stderr)
+              f"(see the Validation section of README.md)", file=sys.stderr)
         return 1
 
     f77 = np.loadtxt(args.trials, ndmin=2)

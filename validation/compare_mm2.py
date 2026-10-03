@@ -26,7 +26,7 @@ Three things are reported:
   profiles is the ``ek`` discrepancy without the proposal in the way.
 
 Requires the instrumented Fortran run (``aao_rad.trials`` with the 12-column
-layout -- see ``validation/README.md``).
+layout -- see the Validation section of ``README.md``).
 """
 
 from __future__ import annotations
@@ -133,7 +133,7 @@ def main() -> int:
 
     if not args.trials.exists():
         print(f"{args.trials} not found; run the instrumented aao_rad first "
-              f"(see validation/README.md)", file=sys.stderr)
+              f"(see the Validation section of README.md)", file=sys.stderr)
         return 1
 
     f77 = np.loadtxt(args.trials, ndmin=2)

@@ -25,6 +25,8 @@ validation. See [Building the Fortran reference](#building-the-fortran-reference
 - [Performance and tuning](#performance-and-tuning)
 - [Output](#output)
 - [Validation](#validation)
+  - [The shared-key trap](#the-shared-key-trap)
+  - [A second, output-only bug: `asym_p`](#a-second-output-only-bug-asym_p)
 - [Differences from the Fortran original](#differences-from-the-fortran-original)
 - [Bugs found in the Fortran original](#bugs-found-in-the-fortran-original)
 - [Development](#development)
@@ -249,10 +251,13 @@ plots. They are not part of the installed package.
 | `compare_mm2.py` | survivor `mm^2`/`W_real` and the `A(ek)` acceptance profile |
 | `compare_sigr.py` | the raw cross section, recovered from the trial dump |
 | `weight_breakdown.py` | the cross section split by branch and importance region |
+| `compare_references.py` | two Fortran n-tuples from one run card — proves a change to the reference was surgical |
 
 The Fortran side needs the instrumented `aao_rad.f90` (the version in this
 branch), which dumps a 32-variable n-tuple plus the per-trial measure to units
-13 and 14. See [Building the Fortran reference](#building-the-fortran-reference).
+13 and 14. Set `AAO_TRIALS=0` to skip the trial dump (it is ~0.5 GB per 8000
+events and costs about as much wall time as the physics). See
+[Building the Fortran reference](#building-the-fortran-reference).
 
 Reproducing the headline number:
 
@@ -487,6 +492,64 @@ The regression test checks the correlation and the mean of `phi*` within each
 `cos(theta*)` decile; both marginals still pass with the bug in place, which is
 exactly the point.
 
+### A second, output-only bug: `asym_p`
+
+After the shared-key fix, `asym_p` was the last observable still disagreeing:
+5 of 40 per-bin ratios over 3σ, max abs z = 5.30, and a p50 ratio of 0.709. This
+one was **in the Fortran, not the port**, and it is worth writing down because
+the way it hid is instructive.
+
+`asym_p` is produced by `dsigma`, which the original calls from two places:
+
+- the soft branch, `if (ek .lt. delta)` → `call dsigma(th0, qsq, epw, ...)` at
+  `aao_rad.f90:789`, where `epw` is the driver's `sqrt(w_sq)`;
+- inside `real function sigma(...)` at `aao_rad.f90:1327`, with
+  `epw = sqrt(mf2)` and `mf2 = uu - 2*ek*(u0 - pu*csthk)`.
+
+Those are two *different* hadronic masses — the second is lower by the radiated
+photon energy — and `asym_p` depends on `W`, so the branches genuinely need
+separate evaluations. The port does both and selects between them on `ek`.
+
+The original's problem was scoping. `asym_p` is declared twice: once in the
+driver and once, separately, inside `sigma()`. No `COMMON` block connects them,
+so the driver's copy was written **only** by the soft branch. For every
+`ek >= delta` event — the radiative branch, 24% of the accepted sample —
+`ntp(32) = asym_p` recorded whatever the last *soft trial* had left behind, not
+the event's own value. Trials outnumber accepted events by ~3e4, so the stale
+values came from an unrecorded trial with unrelated kinematics.
+
+Isolating it took three measurements against the reference n-tuple:
+
+| | rows | std | KS vs port `asym` at soft `W` | KS vs port `asym` at radiative `W` |
+|---|---|---|---|---|
+| Fortran soft rows | 6039 | 0.0462 | **0.0054** | 0.0163 |
+| Fortran radiative rows | 1962 | 0.0628 | 0.0824 | 0.0934 |
+
+The soft rows reproduce the port's soft-branch asymmetry pointwise (median
+|Δ| = 7.9e-6, float32 noise), which confirms the port's soft branch and pins the
+two `W` conventions. The radiative rows match *neither*, and their spread is
+**wider than either** — the signature of a value drawn from a different point in
+kinematic space rather than a mis-convention. The noise floor for 1962 vs 6039
+rows is 0.017, so both radiative KS values are 5x over.
+
+The first hypothesis was wrong and worth recording: stale-in-a-loop would imply
+radiative rows duplicating earlier rows, and they do not (2 of 1962 coincide
+with any accepted soft row). The value comes from the last soft *trial*, not
+the last soft *event*, which is why there is nothing to match.
+
+The fix is three lines in the instrumented `aao_rad.f90` — promote `asym_p` to
+`COMMON /radasy/` shared by the driver and `sigma()`, and initialise it to zero
+on entry to `sigma()` so the three early returns before `dsigma` (`mf2` below
+threshold, `ffac <= 0`, `gfac <= 0`) cannot leave it stale either. No physics
+changes: `dsigma` already computed the value, it was being discarded.
+
+`tests/test_kinematics.py::TestBeamAsymmetryBranch` pins the port side: it
+checks that each branch's `asym_p` equals `response_functions` evaluated at that
+branch's own `W`, that the *other* branch's `W` gives a materially different
+answer (so the test cannot pass with the branch selection dropped), and that
+`asym_p` is not a repeated value. Reverting the port's branch selection makes
+the radiative half fail.
+
 ## Differences from the Fortran original
 
 Deliberate, and each one is a config option you can turn off:
@@ -525,6 +588,15 @@ the validation dumps shift around — search for the quoted statement instead.
 - `read_sf_file.f90` skips the wrong number of columns for the `M_{L-}` row, so
   the shipped table reader mis-parses. `validation/dump_table.f90` is the
   corrected reader, and the port's parser is validated bit-for-bit against it.
+- **`asym_p` is never computed for the radiative branch.** It is a local of
+  `sigma()`, so the `dsigma` call inside that function wrote a value that died
+  with the call and the driver's `ntp(32)` kept whatever the last *soft trial*
+  had left in it. Since the radiative branch is the one `sigma()` serves, every
+  event with `ek >= delta` — 24% of the sample — recorded an unrelated trial's
+  beam asymmetry. The physics was always computed; only the output column was
+  wrong. Fixed in this branch by promoting `asym_p` to `COMMON /radasy/` and
+  initialising it so the three early returns before `dsigma` cannot leave it
+  stale either. See [the asym_p write-up](#a-second-output-only-bug-asym_p).
 - `interp.f90` has its `STOP` statements commented out, so an out-of-range
   lookup silently returns garbage instead of failing.
 - `multipole_amps.f90` clamps `W > 2` to `2` *and* writes the clamped value back
@@ -602,6 +674,11 @@ ln -s "$REPO/parms" spp_tbl
 This writes `aao_rad.ntuple` (47 columns: the 32 n-tuple fields plus 15
 validation mirrors, one row per accepted event), `aao_rad.trials` (12 columns,
 one row per 97th trial that reached the weight stage), and `aao_rad.lund`.
+
+`AAO_TRIALS=0` skips the trial dump. It is ~0.5 GB per 8000 events and the
+formatting costs about as much wall time as the physics, so long runs that only
+need the event n-tuple should set it. Nothing in it touches the random
+sequence.
 
 The trial dump's column 10 is the Fortran's `sigr` *after* the region,
 multipole and Jacobian factors, i.e. the full trial weight — not the bare cross
