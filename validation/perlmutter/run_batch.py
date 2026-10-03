@@ -105,7 +105,44 @@ def allocated_cpus() -> list[int]:
     return cpus or [0]
 
 
-def taskset_prefix(worker: int, cpus_per_job: int) -> list[str]:
+def core_groups(cpus: list[int]) -> list[list[int]]:
+    """Group the allocation's CPUs by the physical core each belongs to.
+
+    A PM-CPU node's affinity mask carries one entry per hardware thread, so two
+    entries that sit next to each other in the mask are usually the two
+    hyperthreads of a single core.  Knowing the grouping is what lets a worker be
+    handed N *cores* instead of N neighbouring mask entries.  Falls back to one
+    CPU per group where the kernel does not expose the topology.
+    """
+    groups: list[list[int]] = []
+    index: dict[int, int] = {}
+    for cpu in cpus:
+        try:
+            raw = Path(
+                f"/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list"
+            ).read_text()
+        except OSError:
+            return [[c] for c in cpus]
+        siblings: set[int] = set()
+        for part in raw.strip().split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if "-" in part:
+                lo, hi = part.split("-")
+                siblings.update(range(int(lo), int(hi) + 1))
+            else:
+                siblings.add(int(part))
+        key = min(siblings) if siblings else cpu
+        if key not in index:
+            index[key] = len(groups)
+            groups.append([cpu])
+        else:
+            groups[index[key]].append(cpu)
+    return groups
+
+
+def taskset_prefix(worker: int, cpus_per_job: int, jobs: int) -> list[str]:
     """Give one worker process its own slice of the allocation.
 
     XLA sizes its CPU thread pool from ``sched_getaffinity``, so restricting a
@@ -115,13 +152,39 @@ def taskset_prefix(worker: int, cpus_per_job: int) -> list[str]:
     --cpus-per-job 32`` gives four processes 32 threads each.  Slurm hands out
     an arbitrary slice of the node, so the slices are cut from the real mask
     rather than from cores numbered 0..n-1.
+
+    The CPUs are handed out round-robin over *cores* -- the first hardware thread
+    of every core, then the second of every core -- and each worker takes the
+    next ``cpus_per_job`` of them.  This used to cut contiguous runs of the mask
+    instead, which happens to be right only when consecutive entries belong to
+    different cores.  A probe on the node says they do: the mask is thread-major,
+    with the siblings of core 0 being entries 0 and 128.  So on this node type
+    contiguous cutting did give each worker the cores it asked for, and the real
+    cost of the change is that it no longer depends on that holding.  Number the
+    mask core-major instead, where consecutive entries *are* siblings, and every
+    layout halves: ``--cpus-per-job 1`` puts two workers on each of 64 cores, and
+    ``--cpus-per-job 2`` gives a worker both threads of one core when it was
+    promised two cores.
+
+    Round-robin keeps each worker spread over distinct cores under either
+    numbering, and never leaves a core idle while another is doubled up.  Where
+    there are more CPUs than cores the cores are shared deliberately -- that is
+    what using all 256 hardware threads means.
+
+    The sibling pairing comes from core_groups, so nothing here assumes how Slurm
+    numbered the mask.
     """
     if cpus_per_job <= 0 or shutil.which("taskset") is None:
         return []
-    cpus = allocated_cpus()
-    n = min(cpus_per_job, len(cpus))
-    start = (worker * cpus_per_job) % len(cpus)
-    return ["taskset", "-c", ",".join(str(cpus[(start + i) % len(cpus)]) for i in range(n))]
+    groups = core_groups(allocated_cpus())
+    if not groups:
+        return []
+    depth = max(len(g) for g in groups)
+    order = [g[i] for i in range(depth) for g in groups if len(g) > i]
+    n = min(cpus_per_job, len(order))
+    start = (worker * n) % len(order)
+    picked = [order[(start + i) % len(order)] for i in range(n)]
+    return ["taskset", "-c", ",".join(str(c) for c in picked)]
 
 
 def build_job(
@@ -131,6 +194,7 @@ def build_job(
     repo: Path,
     python: str,
     cpus_per_job: int,
+    jobs: int,
     worker: int,
     gpus: int,
 ) -> tuple[list[str], dict, Path, Path | None]:
@@ -154,7 +218,7 @@ def build_job(
         env["AAO_TRIALS"] = "0"
         # The original is serial Fortran with no OpenMP directives, so a core is
         # all it can use; one process per core is the only way to fill the node.
-        cmd = taskset_prefix(worker, cpus_per_job or 1) + [str(binary)]
+        cmd = taskset_prefix(worker, cpus_per_job or 1, jobs) + [str(binary)]
         return cmd, env, run_dir, card
 
     env["PYTHONPATH"] = os.pathsep.join(
@@ -176,7 +240,7 @@ def build_job(
     else:
         env["JAX_PLATFORMS"] = "cpu"
 
-    cmd = taskset_prefix(worker, cpus_per_job) + [
+    cmd = taskset_prefix(worker, cpus_per_job, jobs) + [
         python,
         "-m",
         "aao_rad.cli",
@@ -237,7 +301,9 @@ def run_all(args, runs: list[dict], root: Path, repo: Path) -> int:
 
     if args.dry_run:
         for run in pending[:3]:
-            job = build_job(run, args.code, root, repo, args.python, args.cpus_per_job, 0, gpus)
+            job = build_job(
+                run, args.code, root, repo, args.python, args.cpus_per_job, workers, 0, gpus
+            )
             print("would run:", " ".join(job[0]))
         return 0
 
@@ -247,7 +313,9 @@ def run_all(args, runs: list[dict], root: Path, repo: Path) -> int:
         futures = {
             pool.submit(
                 execute,
-                build_job(run, args.code, root, repo, args.python, args.cpus_per_job, i, gpus),
+                build_job(
+                    run, args.code, root, repo, args.python, args.cpus_per_job, workers, i, gpus
+                ),
             ): run["run_id"]
             for i, run in enumerate(pending)
         }
@@ -300,7 +368,7 @@ def check_collisions(runs: list[dict], root: Path, repo: Path) -> int:
             (run_dir / "aao_rad.ntuple").unlink(missing_ok=True)
             (run_dir / "out.txt").unlink(missing_ok=True)
         for run in pairs[cfg_id]:
-            job = build_job(run, "fortran", root, repo, sys.executable, 0, 0, 0)
+            job = build_job(run, "fortran", root, repo, sys.executable, 0, 1, 0, 0)
             _, rc, dt = execute(job)
             print(f"  {run['run_id']}: exit {rc} ({dt:.0f}s)")
             time.sleep(2.0)
