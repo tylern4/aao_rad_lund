@@ -36,11 +36,11 @@ validated local configuration.
 On a Perlmutter login node, from a clone of this repo:
 
 ```bash
-export AAO_ACCOUNT=<your NERSC project account>
 validation/perlmutter/submit_all.sh
 ```
 
-That creates the python venv with `jax[cuda12]` (one-time, on the login node
+That submits everything to project `m3792` (override with `AAO_ACCOUNT`). It
+creates the python venv with `jax[cuda12]` (one-time, on the login node
 — compute nodes have no internet), builds the Fortran binary, writes the
 grid, and submits four jobs:
 

@@ -79,12 +79,28 @@ def run_complete(code: str, run_dir: Path) -> bool:
     return (run_dir / "out.npz").is_file()
 
 
+def allocated_cpus() -> list[int]:
+    """The CPUs this process may actually run on.
+
+    Slurm hands out an arbitrary slice of the node, not CPUs 0..n-1, so pinning
+    to a guessed core can land outside the allocation -- which a cgroup-enforced
+    step treats as a fatal error.  Read the real mask instead.
+    """
+    try:
+        cpus = sorted(os.sched_getaffinity(0))
+    except AttributeError:  # not Linux
+        cpus = list(range(os.cpu_count() or 1))
+    return cpus or [0]
+
+
 def taskset_prefix(worker: int, pin: bool) -> list[str]:
     """Pin one worker to one core so many concurrent jax processes do not each
-    spawn a full-node thread pool."""
+    spawn a full-node thread pool.  XLA sizes its CPU thread pool from
+    sched_getaffinity, so a one-core mask also means a one-thread pool."""
     if not pin or shutil.which("taskset") is None:
         return []
-    return ["taskset", "-c", str(worker % (os.cpu_count() or 1))]
+    cpus = allocated_cpus()
+    return ["taskset", "-c", str(cpus[worker % len(cpus)])]
 
 
 def build_job(

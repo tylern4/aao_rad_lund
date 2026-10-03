@@ -9,7 +9,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --gpus=4
-#SBATCH --time=04:00:00
+#SBATCH --time=12:00:00
 
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -26,6 +26,10 @@ fi
 # JAX recompiles per configuration (the beam energy enters as a constant);
 # a persistent cache lets the CPU and GPU arms share compile time.
 export JAX_COMPILATION_CACHE_DIR="$ROOT/jax_cache"
+
+# One worker per GPU, each given a single device by run_batch.py; without this
+# every process would try to reserve most of every visible device.
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
 "$PY" "$HERE/make_grid.py" --root "$ROOT"
 
