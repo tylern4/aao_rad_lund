@@ -94,6 +94,14 @@ layout.  Run it before the scan and set `run_py_cpu.sbatch`'s `--jobs` /
 nersc submit $SCRATCH/aao_rad_lund/validation/perlmutter/calibrate.sbatch
 ```
 
+It times 300-event runs and scales them to the grid's 20 000, because the
+1-thread point is the whole point of the measurement and a full-size run there
+takes hours — long past the 30 minutes the `debug` queue allows.  Each label is
+appended to `$SCRATCH/aao_rad_scan/calib_results.txt` as it finishes and the
+projection reads that file, so a job killed by its wall clock still leaves usable
+numbers.  A label that exceeds `AAO_CALIB_LABEL_TIMEOUT` (600 s) is recorded as
+`TIMEOUT` and dropped rather than guessed at.
+
 ## Layout on `$SCRATCH`
 
 ```

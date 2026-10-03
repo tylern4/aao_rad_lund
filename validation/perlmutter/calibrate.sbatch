@@ -3,11 +3,22 @@
 # finishes the 192-run grid first?
 #
 # Every run is one fixed 65,536-trial vectorised pass (generate.stream sizes its
-# chunk as max(min(chunk_events, n_events), batch_size), so a run costs the same
-# whatever it keeps), which makes this a clean measurement: time real runs at
+# chunk as max(min(chunk_events, n_events), batch_size), so a run's cost is set
+# by how many trials it takes to reach n_events accepted ones, and is the same
+# whatever it keeps).  That makes this a clean measurement: time real runs at
 # several CPU counts, then project the wall time of the candidate processes x
 # threads layouts.  Thread counts come from taskset, because XLA sizes its pool
 # from sched_getaffinity.
+#
+# Runs are SHORT here -- AAO_CALIB_EVENTS, 300 by default, not the grid's 20,000 --
+# and the projection scales by the ratio.  This is not a rounding of the
+# measurement: the 1-thread point is the whole reason the script exists, and at
+# the grid's 20,000 events a single-threaded run takes hours.  A 300-event run at
+# 1 thread takes tens of seconds, so all eight thread counts fit in the debug
+# queue's 30 minutes; the first attempt used 20,000 and burned its whole limit on
+# the warmup plus one label.  Compilation is a fixed few seconds against tens of
+# seconds of work, so dropping the first repeat still leaves a clean steady-state
+# number at every point.
 #
 # Each thread count is measured with REPEATS sequential runs *inside one
 # process*, and only the repeats after the first are used.  The first pays for
@@ -16,16 +27,21 @@
 # the first process really pays -- and would penalise exactly the many-thread
 # layouts whose runs are short.
 #
+# Results are appended to $ROOT/calib_results.txt as each label finishes, and the
+# projection reads that file rather than in-memory state, so a job killed by its
+# wall clock still leaves usable numbers instead of nothing at all.
+#
 # Run it before the scan (it takes a few minutes) and set run_py_cpu.sbatch's
 # --jobs/--cpus-per-job to whatever wins here:
 #
 #   nersc submit $SCRATCH/aao_rad_lund/validation/perlmutter/calibrate.sbatch
-
-# `debug` rather than `shared`, deliberately inverted from the scan arms.  The
-# shared CPU pool is often saturated enough that a 128-core request waits hours,
-# while debug is a 30-minute queue that starts in seconds and still gets the whole
-# node -- the first calibration run this way took 4s to start and got 128 cores.
-# The measurement only has to fit in 30 minutes, which it does at REPEATS=2.
+#
+# For short experiments this is `debug` rather than `shared`, deliberately
+# inverted from the scan arms.  The shared CPU pool is often saturated enough
+# that a 128-core request waits hours, while debug is a 30-minute queue that
+# starts in seconds and still gets the whole node -- the first calibration run
+# this way took 4s to start and got 128 cores.  The measurement has to fit in
+# those 30 minutes, which the short runs above are sized to do.
 #SBATCH --qos=debug
 #SBATCH --job-name=aao_calib
 #SBATCH --account=m3792
@@ -34,6 +50,12 @@
 # the path is spelled out; $HOME is no alternative since it is 74% full, and /tmp
 # is not shared with the compute nodes.  The API's own default of
 # /global/u1/<user> is a symlink into $HOME and lands there for the same reason.
+#
+# Do not move or relocate this file while the job runs.  $SCRATCH and $HOME are
+# different filesystems, so "moving" a log is a copy plus an unlink: Slurm holds
+# the original inode open and keeps writing to it, which is now unlinked, and the
+# copy stops growing.  The per-label logs under $ROOT are written by the children
+# themselves and are unaffected -- read those if this one goes quiet.
 #SBATCH --output=/pscratch/sd/t/tylern/aao_rad_scan/logs/aao_calib_%j.out
 #SBATCH --constraint=cpu
 #SBATCH --nodes=1
@@ -81,7 +103,19 @@ if [ ! -x "$PY" ]; then
   echo "venv python not found at $PY -- run submit_all.sh first" >&2
   exit 1
 fi
-mkdir -p "$ROOT"
+mkdir -p "$ROOT" "$ROOT/logs"
+
+# The production event count comes from the grid itself, so the projection stays
+# honest if make_grid.py's N_EVENTS is ever changed.
+PROD_EVENTS=$("$PY" -c 'import sys; sys.path.insert(0, sys.argv[1]); import make_grid; print(make_grid.N_EVENTS)' "$HERE")
+CALIB_EVENTS=${AAO_CALIB_EVENTS:-300}
+REPEATS=${AAO_CALIB_REPEATS:-2}
+THREAD_COUNTS=${AAO_CALIB_THREADS:-"1 2 4 8 16 32 64 128"}
+LABEL_TIMEOUT=${AAO_CALIB_LABEL_TIMEOUT:-600}
+RESULTS="$ROOT/calib_results.txt"
+# Start fresh: a stale file from an earlier attempt with different settings would
+# be read back as if it belonged to this one.
+rm -f "$RESULTS"
 
 # A real configuration from the grid, so the measurement includes the physics.
 CARD=$("$PY" - <<'EOF'
@@ -93,12 +127,14 @@ EOF
 )
 NCPU=$("$PY" -c 'import os; print(len(os.sched_getaffinity(0)))')
 FIRST=$("$PY" -c 'import os; print(min(os.sched_getaffinity(0)))')
-REPEATS=${AAO_CALIB_REPEATS:-2}
 echo "card   $CARD"
-echo "node   $NCPU cpus in the affinity mask, lowest is $FIRST, $REPEATS runs per thread count"
+echo "node   $NCPU cpus in the affinity mask, lowest is $FIRST"
+echo "timing $CALIB_EVENTS events x $REPEATS per thread count, grid uses $PROD_EVENTS"
+echo "scale  ${THREAD_COUNTS}"
 echo
 
-# $1 = cpu count, $2 = label.  Prints the per-run seconds, space separated.
+# $1 = cpu count, $2 = label.  Prints the per-run seconds, space separated, or
+# the word TIMEOUT if the label exceeded LABEL_TIMEOUT.
 one_process() {
   local cpus
   # Take a slice of the real affinity mask, striding rather than taking the
@@ -115,14 +151,15 @@ else:
 print(",".join(str(c) for c in picked))
 EOF
 )
-  taskset -c "$cpus" "$PY" - "$CARD" "$REPEATS" "$ROOT" "$2" "$REPO" \
-    2> "$ROOT/calib_$2.log" <<'EOF'
+  if runs=$(timeout "$LABEL_TIMEOUT" taskset -c "$cpus" "$PY" - \
+      "$CARD" "$REPEATS" "$ROOT" "$2" "$REPO" "$CALIB_EVENTS" \
+      2> "$ROOT/calib_$2.log" <<'EOF'
 import sys, time
 from pathlib import Path
 
 from aao_rad.cli import main
 
-card, repeats, root, label, repo = sys.argv[1:6]
+card, repeats, root, label, repo, events = sys.argv[1:7]
 times = []
 for i in range(int(repeats)):
     out = str(Path(root) / f"calib_{label}.npz")
@@ -130,7 +167,7 @@ for i in range(int(repeats)):
     main([
         "--legacy-input", card,
         "--parms", str(Path(repo) / "parms"),
-        "--n-events", "20000",
+        "--n-events", events,
         "--seed", str(4242 + i),
         "--ek-sampling", "fortran",
         "--format", "npz",
@@ -139,36 +176,55 @@ for i in range(int(repeats)):
     times.append(time.perf_counter() - t0)
 print(" ".join(f"{t:.2f}" for t in times))
 EOF
+  ); then
+    printf '%s' "$runs"
+  else
+    printf 'TIMEOUT'
+  fi
 }
 
-# Warm the page cache on the MAID tables: every process reads them, so timing a
-# cold first run would measure the filesystem rather than the layout.
+# Warm the page cache on the MAID tables and pay the compilation once: every
+# process reads them, so timing a cold first run would measure the filesystem
+# rather than the layout.
 echo "warmup: $(one_process "$NCPU" warmup)"
 echo
 
-TIMES=""
-for k in 1 2 4 8 16 32 64 128; do
-  [ "$k" -le "$NCPU" ] || break
+for k in $THREAD_COUNTS; do
+  [ "$k" -le "$NCPU" ] || { echo "threads $k: skipped, node has $NCPU"; continue; }
   runs=$(one_process "$k" "t$k")
   echo "threads $k: $runs"
-  # keep every repeat; the projection drops the first (compilation)
-  TIMES="$TIMES $k:${runs// /,}"
+  # Record as we go.  A label that timed out is written out as such and dropped
+  # by the projection rather than guessed at: its true cost is unknown, and only
+  # knowing "at least this slow" is not enough to interpolate from.
+  printf 't%s\t%s\n' "$k" "${runs// /,}" >> "$RESULTS"
 done
 
 echo
-"$PY" - "$NCPU" "$TIMES" <<'EOF'
+"$PY" - "$NCPU" "$CALIB_EVENTS" "$PROD_EVENTS" "$RESULTS" <<'EOF'
 import math, sys
 
 ncpu = int(sys.argv[1])
+calib_events, prod_events = int(sys.argv[2]), int(sys.argv[3])
+results_path = sys.argv[4]
+
 measured = {}
-for field in sys.argv[2].split():
-    k, runs = field.split(":")
-    measured[int(k)] = [float(x) for x in runs.split(",")]
+for line in open(results_path):
+    line = line.strip()
+    if not line:
+        continue
+    label, runs = line.split("\t")
+    if runs == "TIMEOUT":
+        print(f"  (dropped {label}: exceeded the per-label timeout)")
+        continue
+    measured[int(label[1:])] = [float(x) for x in runs.split(",")]
+
+if not measured:
+    sys.exit("no usable measurements")
 
 # steady state: the repeats after the compile.  min, because a run interrupted
 # by another tenant should not be mistaken for the layout's cost.
 steady = {k: min(v[1:]) if len(v) > 1 else v[0] for k, v in measured.items()}
-base = steady.get(1) or min(steady.values())
+scale = prod_events / calib_events
 
 
 def interp(k):
@@ -187,16 +243,25 @@ def interp(k):
 
 
 runs = 192
-print(f"steady-state run at 1 thread: {base:.1f}s")
+one = steady.get(1)
+if one is None:
+    print(f"no 1-thread measurement: no single-thread baseline to compare "
+          f"against, and no extrapolated cost below {min(steady)} threads")
+    print(f"scaling {calib_events}-event runs to the grid's {prod_events}")
+else:
+    print(f"steady-state run at {calib_events} events, 1 thread: {one:.1f}s")
+    print(f"scaled to the grid's {prod_events} events: {one * scale:.1f}s")
+print()
 print(f"{'layout':>14} {'threads':>8} {'waves':>6} {'projected':>10} {'vs 1x1':>8}")
 best = None
 for procs in (1, 2, 4, 8, 16, 32, 64, 128):
     if procs > ncpu:
         break
     threads = max(1, ncpu // procs)
-    total = math.ceil(runs / procs) * interp(threads)
+    total = math.ceil(runs / procs) * interp(threads) * scale
+    gain = f"{one * runs * scale / total:>7.1f}x" if one else f"{'-':>8}"
     print(f"{procs:>6} x {threads:<4}   {threads:>8} {math.ceil(runs / procs):>6} "
-          f"{total / 60:>9.1f}m {base * runs / total:>7.1f}x")
+          f"{total / 60:>9.1f}m {gain}")
     if best is None or total < best[0]:
         best = (total, procs, threads)
 print()
