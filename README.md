@@ -269,7 +269,7 @@ ln -sf "$OLDPWD/parms" spp_tbl
 ../../build/aao_rad < "$OLDPWD/validation/maid07_pi+.inp"
 
 # 2. compare the trial measures.  --tdump is the stride of the Fortran's trial
-#    dump (tdump = 97 at aao_rad.f90:391, applied by the mod() guard at :948),
+#    dump (tdump = 97 at aao_rad.f90:394, applied by the mod() guard at :967),
 #    so P(reach) is n_dumped * tdump / ntries.
 cd -
 python validation/compare_trials.py --trials /tmp/frun_mm2/aao_rad.trials \
@@ -443,7 +443,7 @@ The one substantive lesson from this comparison is in the next section.
   quantity on both sides — the cut is applied to the pre-exit electron energy
   but the recorded column comes from the final state, which uses the post-exit
   one, and the Fortran does exactly the same (it updates `ep` at
-  `aao_rad.f90:1003` and only then calls `missm` again at `:1014`) — and the two
+  `aao_rad.f90:1023` and only then calls `missm` again at `:1034`) — and the two
   means agree to 0.1%. The port's recorded maximum reaches 1.111 where the
   reference stops at 1.080 because the `eloss`-driven overshoot past the cut
   ceiling affects about one event in 10^4-10^5, and the port sample is five
@@ -464,7 +464,7 @@ phicm_deg = 360.0 * u(k_cm)      # same key as csthcm
 ```
 
 `cos(theta*)` and `phi*` are two independent `myran` calls in the Fortran
-(`aao_rad.f90:779-780`). Drawing both from one JAX key makes
+(`aao_rad.f90:794-795`). Drawing both from one JAX key makes
 `phi* = 180*(cos(theta*) + 1)` **exactly** — verified
 `max |phi* - 180(cos(theta*)+1)| = 0.0` — which confines the pion decay
 direction to a curve on the sphere instead of covering it.
@@ -502,8 +502,8 @@ the way it hid is instructive.
 `asym_p` is produced by `dsigma`, which the original calls from two places:
 
 - the soft branch, `if (ek .lt. delta)` → `call dsigma(th0, qsq, epw, ...)` at
-  `aao_rad.f90:789`, where `epw` is the driver's `sqrt(w_sq)`;
-- inside `real function sigma(...)` at `aao_rad.f90:1327`, with
+  `aao_rad.f90:807`, where `epw` is the driver's `sqrt(w_sq)`;
+- inside `real function sigma(...)` at `aao_rad.f90:1366`, with
   `epw = sqrt(mf2)` and `mf2 = uu - 2*ek*(u0 - pu*csthk)`.
 
 Those are two *different* hadronic masses — the second is lower by the radiated
@@ -518,24 +518,32 @@ so the driver's copy was written **only** by the soft branch. For every
 the event's own value. Trials outnumber accepted events by ~3e4, so the stale
 values came from an unrecorded trial with unrelated kinematics.
 
-Isolating it took three measurements against the reference n-tuple:
+Isolating it took evaluating the port's response at the *reference rows' own
+kinematics*, split by branch. Each row is compared against the port's `asym`
+for the same event, at that branch's `W`, so the only difference left is which
+`W` (and, before the fix, which event) produced the recorded number. The floor
+is `1.36 * sqrt(2/n)` for an n-vs-n comparison:
 
-| | rows | std | KS vs port `asym` at soft `W` | KS vs port `asym` at radiative `W` |
-|---|---|---|---|---|
-| Fortran soft rows | 6039 | 0.0462 | **0.0054** | 0.0163 |
-| Fortran radiative rows | 1962 | 0.0628 | 0.0824 | 0.0934 |
+| reference | branch | rows | KS | x floor | std ref | std port | median abs diff |
+|---|---|---|---|---|---|---|---|
+| before fix | soft | 6039 | 0.0015 | 0.06x | 0.0462 | 0.0462 | 7.9e-6 |
+| before fix | radiative | 1962 | 0.1172 | **2.70x** | **0.0628** | 0.0433 | 4.7e-2 |
+| after fix | soft | 6038 | 0.0015 | 0.06x | 0.0453 | 0.0453 | 7.9e-6 |
+| after fix | radiative | 1963 | 0.0234 | **0.54x** | 0.0445 | 0.0440 | 5.7e-3 |
 
-The soft rows reproduce the port's soft-branch asymmetry pointwise (median
-|Δ| = 7.9e-6, float32 noise), which confirms the port's soft branch and pins the
-two `W` conventions. The radiative rows match *neither*, and their spread is
-**wider than either** — the signature of a value drawn from a different point in
-kinematic space rather than a mis-convention. The noise floor for 1962 vs 6039
-rows is 0.017, so both radiative KS values are 5x over.
+The soft rows reproduce the port pointwise to 7.9e-6 — float32 noise — which
+confirms the port's soft branch and pins the two `W` conventions. The radiative
+rows matched neither, and their spread was **wider than the port's**, which is
+the signature of a value drawn from a different point in kinematic space rather
+than of a mis-convention: a wrong `W` would have been wrong by a systematic
+amount, not drawn from a wider pool. The first hypothesis was wrong and worth
+recording — stale-in-a-loop would imply radiative rows duplicating earlier rows,
+and they do not (2 of 1962 coincide with any accepted soft row), because the
+value comes from the last soft *trial*, not the last soft *event*.
 
-The first hypothesis was wrong and worth recording: stale-in-a-loop would imply
-radiative rows duplicating earlier rows, and they do not (2 of 1962 coincide
-with any accepted soft row). The value comes from the last soft *trial*, not
-the last soft *event*, which is why there is nothing to match.
+After the fix the radiative rows sit at 0.54x the floor, i.e. indistinguishable
+from the port, and `validation/compare_references.py` confirms that all 32
+event columns of the reference are unchanged between the two runs.
 
 The fix is three lines in the instrumented `aao_rad.f90` — promote `asym_p` to
 `COMMON /radasy/` shared by the driver and `sigma()`, and initialise it to zero
@@ -603,14 +611,14 @@ the validation dumps shift around — search for the quoted statement instead.
   into a `COMMON` block, so a later caller sees a wrong `w`. The port
   reproduces the clamp on the lookup only, evaluating `nu_cm`, `qv_mag_cm`,
   `ppi_mag_cm` and `ekin` at the unclamped `W` as `maid_lee.f90` does.
-- `sigr_max = sigr_max * fmcall` (`:530`) zeroes a user-supplied ceiling when
+- `sigr_max = sigr_max * fmcall` (`:546`) zeroes a user-supplied ceiling when
   `fmcall = 0`.
-- `sig_tot = sig_tot - sigr_max` (`:1002`) subtracts the *ceiling* on the
+- `sig_tot = sig_tot - sigr_max` (`:1028`) subtracts the *ceiling* on the
   exit-loss rejection path instead of `sigr`, biasing `sig_sum`.
-- `delphi` (`:698-702`) is computed geometrically, bounded to `[pi/9, 2pi]`, and
-  then unconditionally overwritten with `pi/9` at `:704`, so the whole
+- `delphi` (`:714-718`) is computed geometrically, bounded to `[pi/9, 2pi]`, and
+  then unconditionally overwritten with `pi/9` at `:720`, so the whole
   computation is dead code.
-- The region-5 band test at `:734` uses `.or.` where the surrounding logic implies
+- The region-5 band test at `:750` uses `.or.` where the surrounding logic implies
   `.and.`, so a trial near either band is rejected.
 - The LUND writer emits `px py pz E` into fields the format defines as
   `E px py pz`, which is why the original's output will not load.
@@ -649,7 +657,7 @@ Layout:
 
 One note for reading `generate.py`: the integration region factors
 (`mcfac`, `mpfac`) look wrong until you check them against the region-sampling
-block in `aao_rad.f90` (`:673`–`:745`). They are reproduced exactly, and
+block in `aao_rad.f90` (`:711`–`:758`). They are reproduced exactly, and
 `compare_sigma_points.py` checks the reconstruction to six digits per region.
 
 ## Building the Fortran reference
@@ -685,6 +693,20 @@ multipole and Jacobian factors, i.e. the full trial weight — not the bare cros
 section. `validation/compare_sigr.py` recovers the raw cross section from it as
 `weight / (mcfac * mpfac * jacob)`, which is what separates a physics difference
 from a geometry one.
+
+Two traps in the n-tuple columns, both of which cost time:
+
+- **`soft_ek` is only assigned in the radiative branch** (`aao_rad.f90:934`, past
+  the `go to 28` at `:914` that the soft branch takes). Soft events therefore record
+  whatever `ek` the last radiative *trial* held. Do not use it to identify the
+  branch — and note the corollary, which is the surprise: **75% of accepted
+  events are soft**, not the ~10% the `E_gamma` mean of 0.014 GeV suggests,
+  because the radiative tail is heavy enough to carry the mean. The reliable
+  branch indicator is `ntp(17) = eg < delta`.
+- The trial dump is written *after* the missing-mass test but *before* the
+  accept, and the n-tuple records the post-exit `missm` call at `:1034`, not the
+  pre-exit one at `:941`. The `mm2` in the trial file and the `mm2` in the
+  n-tuple are therefore different quantities by construction.
 
 The `validation/dump_*.f90` drivers lift the code under test verbatim out of
 `aao_rad.f90` at build time, so they cannot drift from it:

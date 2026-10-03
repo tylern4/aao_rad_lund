@@ -458,8 +458,9 @@ class TestBeamAsymmetryBranch:
     and passes ``epw = sqrt(mf2)`` -- a different mass, smaller by the radiated
     energy.
 
-    The two disagree by ~17% in the median here, which is why the port keeps
-    both evaluations rather than sharing one.  It is also exactly where the
+    The two disagree by 0.006 in the median on a 60k-trial batch, about 22% of
+    the median asymmetry, which is why the port keeps both evaluations rather
+    than sharing one.  It is also exactly where the
     original went wrong: ``asym_p`` was a *local* of ``sigma()``, so the value
     ``dsigma`` computed for the radiative branch died with the call and
     ``ntp(32)`` recorded the last soft *trial*'s asymmetry instead of the
