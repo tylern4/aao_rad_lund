@@ -16,7 +16,10 @@
 #SBATCH --qos=shared
 #SBATCH --job-name=aao_py_gpu
 #SBATCH --account=m3792
-#SBATCH --output=/global/u1/t/tylern/aao_%j.out
+#SBATCH --output=/pscratch/sd/t/tylern/aao_rad_scan/logs/aao_py_gpu_%j.out
+# Slurm does not expand $SCRATCH here -- --output is read at submit time, before any
+# of this script's own setup -- so the path is spelled out.  It cannot be $HOME or
+# /tmp either: $HOME is 74% full, and /tmp is not shared with the compute nodes.
 #SBATCH --constraint=gpu
 #SBATCH --nodes=1
 #SBATCH --ntasks=1

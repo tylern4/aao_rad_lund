@@ -29,7 +29,12 @@
 #SBATCH --qos=debug
 #SBATCH --job-name=aao_calib
 #SBATCH --account=m3792
-#SBATCH --output=/global/u1/t/tylern/aao_%j.out
+# All real work and all logs live under $SCRATCH.  Slurm does not expand $SCRATCH
+# in --output (it is read at submit time, before any of this script's setup), so
+# the path is spelled out; $HOME is no alternative since it is 74% full, and /tmp
+# is not shared with the compute nodes.  The API's own default of
+# /global/u1/<user> is a symlink into $HOME and lands there for the same reason.
+#SBATCH --output=/pscratch/sd/t/tylern/aao_rad_scan/logs/aao_calib_%j.out
 #SBATCH --constraint=cpu
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
