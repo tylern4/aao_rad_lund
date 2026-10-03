@@ -35,7 +35,7 @@ mkdir -p "$ROOT/logs"
 #    node, and $HOME is small and slow.
 UV=$(command -v uv || true)
 if [ ! -x "$PYBIN" ]; then
-  echo "== creating venv at $VENV (one-time; downloads ~2 GB of CUDA wheels)"
+  echo "== creating venv at $VENV (one-time; downloads ~6 GB of CUDA wheels)"
   export UV_PYTHON_INSTALL_DIR="$SCRATCH/uv/python"
   export UV_CACHE_DIR="$SCRATCH/uv/cache"
   mkdir -p "$UV_PYTHON_INSTALL_DIR" "$UV_CACHE_DIR" "$VENV"
@@ -56,10 +56,16 @@ print(f"venv ok: python {sys.version.split()[0]}, jax {jax.__version__}")
 EOF
 fi
 
-# 2. the Fortran binary, with the repo's own Makefile (gfortran).
+# 2. the Fortran binary, with the repo's own Makefile (gfortran).  gcc-native is
+#    on the default PATH on the login and compute nodes; `module load gcc`
+#    actually *fails* there, so it is only a fallback.
 if [ ! -x "$REPO/bin/aao_rad_lund" ]; then
   echo "== building aao_rad with gfortran"
-  module load gcc
+  command -v gfortran >/dev/null || module load gcc || true
+  command -v gfortran >/dev/null || {
+    echo "no gfortran on PATH -- load a gcc/craype compiler module" >&2
+    exit 1
+  }
   make -C "$REPO"
 fi
 

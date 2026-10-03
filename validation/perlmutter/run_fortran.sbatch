@@ -27,9 +27,15 @@ if [ ! -x "$PY" ]; then
   exit 1
 fi
 
-module load gcc
+# gcc-native is already on PATH on the compute nodes; `module load gcc` fails
+# there, so it is only a fallback.
+command -v gfortran >/dev/null || module load gcc || true
 if [ ! -x "$REPO/bin/aao_rad_lund" ]; then
   echo "== building aao_rad (gfortran)"
+  command -v gfortran >/dev/null || {
+    echo "no gfortran on PATH -- load a gcc/craype compiler module" >&2
+    exit 1
+  }
   make -C "$REPO"
 fi
 
