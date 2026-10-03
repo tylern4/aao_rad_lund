@@ -160,11 +160,15 @@ def build_job(
     env["PYTHONPATH"] = os.pathsep.join(
         [str(repo / "src"), env["PYTHONPATH"]] if env.get("PYTHONPATH") else [str(repo / "src")]
     )
-    # Only a worker that was not given a slice of the allocation should use the
-    # threads the sbatch script sized; a pinned worker keeps one thread, since its
-    # taskset mask is what bounds it.  XLA reads its pool size from the affinity
-    # mask, so this is belt and braces for the OpenMP-backed pieces.
-    env["OMP_NUM_THREADS"] = "1" if cpus_per_job else env.get("OMP_NUM_THREADS", "1")
+    # A worker given a slice of the allocation is told the same width in thread
+    # counts that its taskset mask gives it in cores.  XLA sizes its pool from the
+    # affinity mask, so taskset is what really bounds the port's own loops; this
+    # is for the OpenMP-backed pieces (BLAS under numpy/scipy, used to read and
+    # interpolate the tables), which would otherwise serialise.  Telling a worker
+    # pinned to N cores that it has one thread is backwards, and it would quietly
+    # turn the processes x threads layout calibrate.sbatch picks back into
+    # processes x 1.  An unpinned worker inherits whatever the sbatch script set.
+    env["OMP_NUM_THREADS"] = str(cpus_per_job) if cpus_per_job else env.get("OMP_NUM_THREADS", "1")
     if gpus:
         vis = os.environ.get("CUDA_VISIBLE_DEVICES", "")
         devices = vis.split(",") if vis else [str(i) for i in range(gpus)]

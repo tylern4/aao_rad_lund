@@ -72,7 +72,11 @@ unset XLA_FLAGS
 "$PY" "$HERE/make_grid.py" --root "$ROOT"
 
 # --cpus-per-job defaults to 0, which leaves the process the whole allocation so
-# XLA sizes its pool from the node's affinity mask.  AAO_CPU_JOBS exists to try a
-# processes x threads split without editing this file.
+# XLA sizes its pool from the node's affinity mask.  AAO_CPU_JOBS and AAO_CPU_CPUS
+# exist to try a processes x threads split without editing this file -- they are
+# the two numbers calibrate.sbatch prints when it reports a winning layout, so a
+# calibration can be applied without a commit.  AAO_CPU_JOBS alone leaves
+# --cpus-per-job at 0, which means "all of it".
 "$PY" "$HERE/run_batch.py" --code py_cpu --root "$ROOT" --repo "$REPO" \
-  --python "$PY" --jobs "${AAO_CPU_JOBS:-1}"
+  --python "$PY" --jobs "${AAO_CPU_JOBS:-1}" \
+  --cpus-per-job "${AAO_CPU_CPUS:-0}"
