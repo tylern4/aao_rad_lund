@@ -125,6 +125,56 @@ def test_unpinned_worker_gets_no_taskset(node):
     assert run_batch.taskset_prefix(3, -1, 4) == []
 
 
+# The thread-count variables a pinned worker must be told the width of, and the
+# value a worker must never keep when it has been given fewer cores than that.
+THREAD_VARS = ["OMP_NUM_THREADS", "JAX_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"]
+
+
+def _env_for(node, tmp_path, cpus_per_job, jobs=4, worker=0, code="py_cpu"):
+    """The environment build_job hands to one child process."""
+    grid = tmp_path / "grid"
+    grid.mkdir(exist_ok=True)
+    (grid / "cfg_000.txt").write_text("run card placeholder\n")
+    run = {"run_id": "r0", "cfg_id": "cfg_000", "n_events": "10", "seed": "1"}
+    _, env, _, _ = run_batch.build_job(
+        run,
+        code,
+        tmp_path,
+        tmp_path,
+        sys.executable,
+        cpus_per_job,
+        jobs,
+        worker,
+        0,
+    )
+    return env
+
+
+@pytest.mark.parametrize("cpus_per_job", [1, 2, 4])
+def test_pinned_worker_is_told_its_slice_width(node, tmp_path, monkeypatch, cpus_per_job):
+    """A worker pinned to N CPUs must be told N threads by every knob.
+
+    The sbatch scripts export these for the whole node, and a pinned worker
+    inherits them.  run_py_cpu.sbatch sets JAX_NUM_THREADS=128 for the node while
+    handing each of its 128 workers 2 cores, so a worker that kept the inherited
+    value would be told to use 128 threads on 2 cores.
+    """
+    monkeypatch.setenv("JAX_NUM_THREADS", "128")
+    monkeypatch.setenv("OMP_NUM_THREADS", "128")
+    env = _env_for(node, tmp_path, cpus_per_job)
+    for var in THREAD_VARS:
+        assert env[var] == str(cpus_per_job), f"{var}={env[var]}, wanted {cpus_per_job}"
+
+
+def test_unpinned_worker_inherits_the_sbatch_thread_count(node, tmp_path, monkeypatch):
+    """With no slice there is nothing to correct, so the sbatch value stands."""
+    monkeypatch.setenv("JAX_NUM_THREADS", "128")
+    monkeypatch.setenv("OMP_NUM_THREADS", "128")
+    env = _env_for(node, tmp_path, 0)
+    assert env["OMP_NUM_THREADS"] == "128"
+    assert env["JAX_NUM_THREADS"] == "128"
+
+
 def test_core_groups_partitions_the_real_mask():
     """Against this machine: every CPU lands in exactly one group, once."""
     cpus = run_batch.allocated_cpus()

@@ -226,13 +226,21 @@ def build_job(
     )
     # A worker given a slice of the allocation is told the same width in thread
     # counts that its taskset mask gives it in cores.  XLA sizes its pool from the
-    # affinity mask, so taskset is what really bounds the port's own loops; this
-    # is for the OpenMP-backed pieces (BLAS under numpy/scipy, used to read and
-    # interpolate the tables), which would otherwise serialise.  Telling a worker
-    # pinned to N cores that it has one thread is backwards, and it would quietly
-    # turn the processes x threads layout calibrate.sbatch picks back into
-    # processes x 1.  An unpinned worker inherits whatever the sbatch script set.
-    env["OMP_NUM_THREADS"] = str(cpus_per_job) if cpus_per_job else env.get("OMP_NUM_THREADS", "1")
+    # affinity mask, so taskset is what really bounds the port's own loops; the
+    # thread-count variables matter for the OpenMP-backed pieces (BLAS under
+    # numpy/scipy, used to read and interpolate the tables), which would otherwise
+    # serialise, and for anything reading them.  All of them are set, not just
+    # OMP_NUM_THREADS: run_py_cpu.sbatch exports JAX_NUM_THREADS for the whole node
+    # (128), and a worker pinned to 2 CPUs that inherits it is being told to use
+    # more threads than it has cores.  An unpinned worker inherits the sbatch
+    # script's values untouched.
+    if cpus_per_job:
+        env["OMP_NUM_THREADS"] = str(cpus_per_job)
+        env["JAX_NUM_THREADS"] = str(cpus_per_job)
+        env["OPENBLAS_NUM_THREADS"] = str(cpus_per_job)
+        env["MKL_NUM_THREADS"] = str(cpus_per_job)
+    else:
+        env.setdefault("OMP_NUM_THREADS", "1")
     if gpus:
         vis = os.environ.get("CUDA_VISIBLE_DEVICES", "")
         devices = vis.split(",") if vis else [str(i) for i in range(gpus)]
