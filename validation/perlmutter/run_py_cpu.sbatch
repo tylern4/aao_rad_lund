@@ -1,7 +1,9 @@
 #!/bin/bash
-# JAX-on-CPU arm of the Perlmutter scan: every manifest job on one PM-CPU
-# node, one single-threaded worker per core (taskset keeps each jax process
-# from spawning a full-node thread pool).
+# JAX-on-CPU arm of the Perlmutter scan: every manifest job from one process,
+# with XLA's CPU thread pool spanning the whole node.  Runs are independent
+# 20k-event batches, so the unit of parallelism is the run; one process with
+# all 128 threads keeps one copy of the tables and one compilation cache hot
+# instead of 128 of each.
 #
 # Needs the venv built by submit_all.sh (AAO_VENV, default $SCRATCH/aao_venv).
 #SBATCH --job-name=aao_py_cpu
@@ -25,5 +27,9 @@ fi
 
 "$PY" "$HERE/make_grid.py" --root "$ROOT"
 
+# --cpus-per-job defaults to 0, which leaves the single process the whole
+# allocation so XLA sizes its pool from the node's affinity mask.
+# AAO_CPU_JOBS exists to try a processes x threads split without editing this
+# file.
 "$PY" "$HERE/run_batch.py" --code py_cpu --root "$ROOT" --repo "$REPO" \
-  --python "$PY" --jobs "$(nproc)" --pin-cpu
+  --python "$PY" --jobs "${AAO_CPU_JOBS:-1}"

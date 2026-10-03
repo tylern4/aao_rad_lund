@@ -1,6 +1,7 @@
 #!/bin/bash
-# JAX-on-GPU arm of the Perlmutter scan: every manifest job on one PM-GPU
-# node, one worker per A100 (4 workers, each pinned to one device).
+# JAX-on-GPU arm of the Perlmutter scan: one process per A100 (4 on a PM-GPU
+# node), each pinned to its device and given a quarter of the host cores for the
+# host side of the work.
 #
 # Needs the venv built by submit_all.sh (jax[cuda12]).
 #SBATCH --job-name=aao_py_gpu
@@ -31,7 +32,10 @@ export JAX_COMPILATION_CACHE_DIR="$ROOT/jax_cache"
 # every process would try to reserve most of every visible device.
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
+GPUS=4
 "$PY" "$HERE/make_grid.py" --root "$ROOT"
 
+# One process per GPU, each restricted to a quarter of the host cores so the
+# four processes do not oversubscribe the node's threads.
 "$PY" "$HERE/run_batch.py" --code py_gpu --root "$ROOT" --repo "$REPO" \
-  --python "$PY" --gpus 4 --jobs 4
+  --python "$PY" --gpus "$GPUS" --jobs "$GPUS" --cpus-per-job "$(( $(nproc) / GPUS ))"

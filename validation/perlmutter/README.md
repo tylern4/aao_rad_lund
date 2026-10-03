@@ -46,14 +46,40 @@ grid, and submits four jobs:
 
 | job | nodes | what |
 |---|---|---|
-| `run_fortran.sbatch` | 1 PM-CPU | 192 runs, one per core, then an md5 seed-collision check |
-| `run_py_cpu.sbatch` | 1 PM-CPU | 192 runs, one single-threaded worker per core |
-| `run_py_gpu.sbatch` | 1 PM-GPU | 192 runs over 4 A100s, one worker per GPU |
+| `run_fortran.sbatch` | 1 PM-CPU | 192 runs, one process per core, then an md5 seed-collision check |
+| `run_py_cpu.sbatch` | 1 PM-CPU | 192 runs from one process, XLA's pool spanning the node |
+| `run_py_gpu.sbatch` | 1 PM-GPU | 192 runs from 4 processes, one per A100 |
 | `run_verify.sbatch` | 1 PM-CPU | verification, after the three above (`--dependency=afterok`) |
 
 Individual arms can be (re)submitted with `sbatch` directly; every batch is
 resumable — completed runs are recognised by their final cross-section line
 and skipped.
+
+### Processes and threads
+
+Each run is an independent 20k-event batch, and `generate.stream` sizes its
+vectorised chunk as `max(min(chunk_events, n_events), batch_size)` — so a run
+costs one fixed 65,536-trial pass whatever it keeps.  Runs are therefore the
+unit of parallelism, and the only question a node layout has to answer is how
+many to have in flight.  `--jobs` sets the processes and `--cpus-per-job` cuts
+each one a slice of the allocation (XLA sizes its thread pool from
+`sched_getaffinity`, so the slice is what sets the thread count):
+
+| arm | layout | reason |
+|---|---|---|
+| fortran | 128 processes × 1 core | the original is serial Fortran with no OpenMP, so a core is all a run can use |
+| py_cpu | 1 process × the whole node | one copy of the tables, one compilation cache, no duplicated runtimes |
+| py_gpu | 4 processes × 32 cores | one per A100, with a quarter of the host cores each |
+
+`calibrate.sbatch` measures the CPU choice rather than assuming it: it times one
+real run at 1, 2, 4 … 128 threads and projects the wall time of every candidate
+layout.  Run it before the scan and set `run_py_cpu.sbatch`'s `--jobs` /
+`--cpus-per-job` to the winner:
+
+```bash
+sbatch --account=m3792 -o $SCRATCH/aao_rad_scan/logs/calib_%j.out \
+       validation/perlmutter/calibrate.sbatch
+```
 
 ## Layout on `$SCRATCH`
 
@@ -68,10 +94,12 @@ $SCRATCH/aao_rad_scan/
   verify/         verification CSVs + summary.txt
 ```
 
-Each Fortran run gets its own directory with a symlinked `spp_tbl/` — the
-MAID tables are opened relative to the CWD (`maid_lee.f90`) and the n-tuple
-path is a compile-time constant.  `AAO_TRIALS=0` keeps the 0.5 GB trial dump
-off while the 32-variable event n-tuple is still written.
+Each run gets its own directory, and the run's CWD *is* that directory — not
+cosmetic: the Fortran opens the MAID tables relative to the CWD
+(`maid_lee.f90`) and writes its n-tuple to the compile-time constant path
+`aao_rad.ntuple`, so without a private CWD parallel runs would read the tables
+fine and then overwrite each other's n-tuple.  `AAO_TRIALS=0` keeps the 0.5 GB
+trial dump off while the 32-variable event n-tuple is still written.
 
 ## Verification
 
@@ -120,5 +148,6 @@ Outputs in `verify/`:
   override the card, and the card carries no seed.
 * One driver (`run_batch.py`) serves all three arms so batching,
   resumability and bookkeeping stay identical between them.
-* Wall-time estimates: Fortran ~2-3 h, JAX-CPU ~1 h, JAX-GPU ~1 h, verify
-  ~20 min; the `#SBATCH --time` headers have headroom.
+* Wall-time estimates: Fortran ~2-3 h (128 single-core processes, two waves),
+  JAX-CPU and JAX-GPU depend on the thread scaling `calibrate.sbatch` measures,
+  verify ~20 min; the `#SBATCH --time` headers have headroom.

@@ -35,11 +35,14 @@ fi
 
 "$PY" "$HERE/make_grid.py" --root "$ROOT"
 
-# One run per core; each run gets its own CWD (the MAID tables are opened
-# relative to CWD) and a symlinked spp_tbl.  AAO_TRIALS=0 keeps the 0.5 GB
-# trial dump off while the event n-tuple is still written.
+# Each run gets its own CWD with a symlinked spp_tbl (the MAID tables are opened
+# relative to CWD) and AAO_TRIALS=0, which keeps the 0.5 GB trial dump off while
+# the event n-tuple is still written -- both handled by run_batch.py.
+#
+# The original is serial Fortran (no OpenMP), so one process per core is the
+# only way to fill the node: 128 single-core workers.
 "$PY" "$HERE/run_batch.py" --code fortran --root "$ROOT" --repo "$REPO" \
-  --jobs "$(nproc)" --pin-cpu
+  --jobs "$(nproc)" --cpus-per-job 1
 
 # The Fortran seeds myran from unixtime (1 s resolution): guard against two
 # runs of one configuration starting in the same second.

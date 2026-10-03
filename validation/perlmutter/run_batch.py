@@ -12,6 +12,18 @@ bookkeeping stay identical between them:
     --code py_gpu    the port on GPU; one worker per GPU, each pinned to its
                      device via CUDA_VISIBLE_DEVICES
 
+The node layout is processes x threads, and each arm picks its own:
+
+    fortran   one process per core -- the original is serial Fortran with no
+              OpenMP directives, so a core is all a run can use
+    py_cpu    one process, no CPU restriction, so XLA's thread pool spans the
+              whole node
+    py_gpu    one process per GPU, each given a quarter of the host cores
+
+Each run is an independent 20k-event batch, so runs are the unit of parallelism
+and the only question a node layout has to answer is how many of them to have in
+flight at once.
+
 Runs are addressed by ``run_id`` from the manifest written by ``make_grid.py``
 and land in ``<root>/<code>/<run_id>/``.  A run whose stdout carries the final
 cross-section line is complete and skipped, so every batch script is
@@ -93,18 +105,34 @@ def allocated_cpus() -> list[int]:
     return cpus or [0]
 
 
-def taskset_prefix(worker: int, pin: bool) -> list[str]:
-    """Pin one worker to one core so many concurrent jax processes do not each
-    spawn a full-node thread pool.  XLA sizes its CPU thread pool from
-    sched_getaffinity, so a one-core mask also means a one-thread pool."""
-    if not pin or shutil.which("taskset") is None:
+def taskset_prefix(worker: int, cpus_per_job: int) -> list[str]:
+    """Give one worker process its own slice of the allocation.
+
+    XLA sizes its CPU thread pool from ``sched_getaffinity``, so restricting a
+    process to N CPUs is what makes it use N threads.  The node layout is
+    therefore a choice of processes x threads: ``--jobs 1`` with no restriction
+    gives one process the whole node's threads, and ``--jobs 4
+    --cpus-per-job 32`` gives four processes 32 threads each.  Slurm hands out
+    an arbitrary slice of the node, so the slices are cut from the real mask
+    rather than from cores numbered 0..n-1.
+    """
+    if cpus_per_job <= 0 or shutil.which("taskset") is None:
         return []
     cpus = allocated_cpus()
-    return ["taskset", "-c", str(cpus[worker % len(cpus)])]
+    n = min(cpus_per_job, len(cpus))
+    start = (worker * cpus_per_job) % len(cpus)
+    return ["taskset", "-c", ",".join(str(cpus[(start + i) % len(cpus)]) for i in range(n))]
 
 
 def build_job(
-    run: dict, code: str, root: Path, repo: Path, python: str, pin: bool, worker: int, gpus: int
+    run: dict,
+    code: str,
+    root: Path,
+    repo: Path,
+    python: str,
+    cpus_per_job: int,
+    worker: int,
+    gpus: int,
 ) -> tuple[list[str], dict, Path, Path | None]:
     """Assemble (command, env, run_dir, stdin_path) for one run."""
     run_dir = root / code / run["run_id"]
@@ -124,7 +152,9 @@ def build_job(
         if not link.exists():
             link.symlink_to(repo / "parms" / "spp_tbl")
         env["AAO_TRIALS"] = "0"
-        cmd = taskset_prefix(worker, pin) + [str(binary)]
+        # The original is serial Fortran with no OpenMP directives, so a core is
+        # all it can use; one process per core is the only way to fill the node.
+        cmd = taskset_prefix(worker, cpus_per_job or 1) + [str(binary)]
         return cmd, env, run_dir, card
 
     env["PYTHONPATH"] = os.pathsep.join(
@@ -138,7 +168,7 @@ def build_job(
     else:
         env["JAX_PLATFORMS"] = "cpu"
 
-    cmd = taskset_prefix(worker, pin) + [
+    cmd = taskset_prefix(worker, cpus_per_job) + [
         python,
         "-m",
         "aao_rad.cli",
@@ -165,12 +195,14 @@ def execute(job: tuple[list[str], dict, Path, Path | None]) -> tuple[str, int, f
     t0 = time.time()
     stdin_fh = open(stdin_path, "rb") if stdin_path else subprocess.DEVNULL
     try:
-        # stdout and stderr share one file: the port prints its final stats
-        # block to stderr, the Fortran prints to stdout, and both codes'
-        # "run is complete" marker lives in this one file.
+        # cwd is the run's own directory, and that is not cosmetic: the Fortran
+        # opens the MAID tables relative to the CWD and writes its n-tuple to the
+        # compile-time constant path "aao_rad.ntuple", so without a private CWD
+        # 128 parallel runs would read the tables fine and then overwrite each
+        # other's n-tuple.
         with open(run_dir / "out.txt", "wb") as out:
             proc = subprocess.run(
-                cmd, env=env, stdin=stdin_fh, stdout=out, stderr=subprocess.STDOUT
+                cmd, env=env, stdin=stdin_fh, stdout=out, stderr=subprocess.STDOUT, cwd=run_dir
             )
     finally:
         if stdin_path:
@@ -197,7 +229,7 @@ def run_all(args, runs: list[dict], root: Path, repo: Path) -> int:
 
     if args.dry_run:
         for run in pending[:3]:
-            job = build_job(run, args.code, root, repo, args.python, args.pin_cpu, 0, gpus)
+            job = build_job(run, args.code, root, repo, args.python, args.cpus_per_job, 0, gpus)
             print("would run:", " ".join(job[0]))
         return 0
 
@@ -206,7 +238,8 @@ def run_all(args, runs: list[dict], root: Path, repo: Path) -> int:
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {
             pool.submit(
-                execute, build_job(run, args.code, root, repo, args.python, args.pin_cpu, i, gpus)
+                execute,
+                build_job(run, args.code, root, repo, args.python, args.cpus_per_job, i, gpus),
             ): run["run_id"]
             for i, run in enumerate(pending)
         }
@@ -259,7 +292,7 @@ def check_collisions(runs: list[dict], root: Path, repo: Path) -> int:
             (run_dir / "aao_rad.ntuple").unlink(missing_ok=True)
             (run_dir / "out.txt").unlink(missing_ok=True)
         for run in pairs[cfg_id]:
-            job = build_job(run, "fortran", root, repo, sys.executable, False, 0, 0)
+            job = build_job(run, "fortran", root, repo, sys.executable, 0, 0, 0)
             _, rc, dt = execute(job)
             print(f"  {run['run_id']}: exit {rc} ({dt:.0f}s)")
             time.sleep(2.0)
@@ -289,7 +322,13 @@ def main() -> int:
     )
     p.add_argument("--gpus", type=int, default=0, help="for --code py_gpu: one worker per GPU")
     p.add_argument(
-        "--pin-cpu", action="store_true", help="taskset each worker to one core (CPU batches)"
+        "--cpus-per-job",
+        type=int,
+        default=0,
+        help="CPUs (and so XLA threads) per worker process, cut from the "
+        "allocation's real affinity mask; 0 leaves the process the whole "
+        "allocation, so --jobs 1 means one process using every thread. The "
+        "serial Fortran ignores this and gets one core per process.",
     )
     p.add_argument(
         "--check-collisions",
