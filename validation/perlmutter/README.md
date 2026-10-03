@@ -1,0 +1,124 @@
+# Perlmutter scan: Fortran vs JAX-CPU vs JAX-GPU
+
+Batch scripts for NERSC Perlmutter that sample the same 96-configuration grid
+with all three implementations, then verify the statistics at scale:
+
+* **Fortran** — the original `aao_rad` (gfortran, this repo's Makefile)
+* **JAX on CPU** — the port, `JAX_PLATFORMS=cpu`
+* **JAX on GPU** — the port, one worker per A100
+
+Everything runs on `$SCRATCH` (`/tmp` is not shared between Perlmutter's
+login and compute nodes and is routinely scrubbed).
+
+## The grid
+
+`make_grid.py` writes 96 run cards: beam energies **2, 4.244, 6, 8, 10 and
+12 GeV** crossed with
+
+| axis | values |
+|---|---|
+| channel | pi+ n (`epirea=3`), pi0 p (`epirea=1`) |
+| beam polarisation | on, off |
+| explicit photon cut (`delta`) | 0.005, 0.05 GeV |
+| target thickness | 5.0, 2.5 cm |
+
+with 20 000 events per run and two runs per configuration (192 run jobs per
+implementation).  Q^2 stays in [0.2, 1.9] GeV^2 — below the 90-degree elastic
+clamp down to 2 GeV — and the E' window is derived per beam energy so the
+whole (Q^2, E') rectangle keeps W in [1.20, 1.98] GeV, inside the MAID07
+table and below both kinematic clamps `aao_rad.f90` applies.  Neither code
+therefore silently samples a clipped window, which would make the cross-code
+comparison meaningless.  The 4.244 GeV point anchors the grid to the
+validated local configuration.
+
+## Usage
+
+On a Perlmutter login node, from a clone of this repo:
+
+```bash
+export AAO_ACCOUNT=<your NERSC project account>
+validation/perlmutter/submit_all.sh
+```
+
+That creates the python venv with `jax[cuda12]` (one-time, on the login node
+— compute nodes have no internet), builds the Fortran binary, writes the
+grid, and submits four jobs:
+
+| job | nodes | what |
+|---|---|---|
+| `run_fortran.sbatch` | 1 PM-CPU | 192 runs, one per core, then an md5 seed-collision check |
+| `run_py_cpu.sbatch` | 1 PM-CPU | 192 runs, one single-threaded worker per core |
+| `run_py_gpu.sbatch` | 1 PM-GPU | 192 runs over 4 A100s, one worker per GPU |
+| `run_verify.sbatch` | 1 PM-CPU | verification, after the three above (`--dependency=afterok`) |
+
+Individual arms can be (re)submitted with `sbatch` directly; every batch is
+resumable — completed runs are recognised by their final cross-section line
+and skipped.
+
+## Layout on `$SCRATCH`
+
+```
+$SCRATCH/aao_rad_scan/
+  grid/           cfg_NNN.txt run cards + manifest.csv (one row per run job)
+  fortran/cfg_NNN_sK/   aao_rad.ntuple (32+15 columns), out.txt, aao_rad.lund
+  py_cpu/cfg_NNN_sK/    out.npz (lossless event n-tuple), out.txt
+  py_gpu/cfg_NNN_sK/    out.npz, out.txt
+  jax_cache/      persistent JAX compilation cache
+  logs/           Slurm job output
+  verify/         verification CSVs + summary.txt
+```
+
+Each Fortran run gets its own directory with a symlinked `spp_tbl/` — the
+MAID tables are opened relative to the CWD (`maid_lee.f90`) and the n-tuple
+path is a compile-time constant.  `AAO_TRIALS=0` keeps the 0.5 GB trial dump
+off while the 32-variable event n-tuple is still written.
+
+## Verification
+
+`verify_statistics.py` (also runnable standalone: `python verify_statistics.py
+--root $SCRATCH/aao_rad_scan`) checks two levels:
+
+**Like-for-like** — the two runs of one configuration within one
+implementation.  The run-to-run cross-section scatter, pooled across all 96
+configurations into one fractional sigma per implementation (the heavy photon
+tail makes the naive `1/sqrt(n_trials)` error optimistic, so the scatter is
+measured, not assumed), plus KS distances per observable against the 95%
+noise floor `1.36*sqrt(2/N)`.
+
+**Cross-code** — Fortran vs JAX-CPU, Fortran vs JAX-GPU and JAX-CPU vs
+JAX-GPU per configuration: the cross-section ratio with an error bar from
+each implementation's pooled scatter (deviation in sigmas), and KS per
+observable against `1.36*sqrt(1/N_A + 1/N_B)`.
+
+CPU and GPU share seeds per configuration, so any CPU-vs-GPU difference is
+pure backend floating-point, not sampling; the Fortran seeds `myran` from
+`unixtime` (1 s resolution) and its two runs are simply independent samples.
+Because the two runs of one configuration are ordered far apart in the work
+list they cannot start in the same second, and `--check-collisions` md5-
+compares every same-configuration pair afterwards as a guard.
+
+Both sigma estimators are the same one the sigma tables quote — mean trial
+weight over all trials times phase space (the Fortran's `sig_sum`, the
+port's `sigma (MC)`) — in micro-barns on both sides.
+
+Outputs in `verify/`:
+
+| file | contents |
+|---|---|
+| `sigmas.csv` | one row per run: cross section, trial count |
+| `like_for_like.csv` | per implementation x configuration: scatter z, worst KS |
+| `cross_code.csv` | per pair x configuration: sigma ratio, z, worst KS |
+| `ks_full.csv` | every configuration x observable x level KS with its floor |
+| `per_observable.csv` | per pair x observable: median/max KS, fraction within floor |
+| `summary.txt` | the overall agreement verdict |
+
+## Notes
+
+* The port runs with `--ek-sampling fortran`, matching the original's
+  RNG-limited photon sampling — the same setting the local validation uses.
+* `--n-events` and `--seed` are passed from the manifest: the CLI flags
+  override the card, and the card carries no seed.
+* One driver (`run_batch.py`) serves all three arms so batching,
+  resumability and bookkeeping stay identical between them.
+* Wall-time estimates: Fortran ~2-3 h, JAX-CPU ~1 h, JAX-GPU ~1 h, verify
+  ~20 min; the `#SBATCH --time` headers have headroom.

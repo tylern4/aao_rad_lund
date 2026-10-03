@@ -1,0 +1,296 @@
+#!/usr/bin/env python3
+"""Run every manifest job for one code, in parallel, inside a Slurm allocation.
+
+One driver serves all three implementations so batching, resumability and
+bookkeeping stay identical between them:
+
+    --code fortran   the original: one CWD per run (the MAID tables are opened
+                     relative to CWD), card on stdin, AAO_TRIALS=0 so the
+                     trial dump is off but the 32-variable event n-tuple is
+                     still written
+    --code py_cpu    the port on CPU (JAX_PLATFORMS=cpu), npz output
+    --code py_gpu    the port on GPU; one worker per GPU, each pinned to its
+                     device via CUDA_VISIBLE_DEVICES
+
+Runs are addressed by ``run_id`` from the manifest written by ``make_grid.py``
+and land in ``<root>/<code>/<run_id>/``.  A run whose stdout carries the final
+cross-section line is complete and skipped, so every batch script is
+resumable.
+
+The port is invoked with ``--n-events`` and ``--seed`` from the manifest --
+the CLI flags override the card, and the card carries no seed, so both must be
+explicit.  ``--ek-sampling fortran`` matches the original's RNG-limited photon
+sampling, which is what the validated local comparison uses.
+
+For the Fortran there is one extra hazard: it seeds ``myran`` from
+``unixtime`` (1 s resolution), so two runs starting in the same second sample
+identically.  The manifest orders the two runs of each configuration far
+apart, and ``--check-collisions`` compares md5 checksums of every
+same-configuration pair afterwards and re-runs any collided pair
+sequentially so the seeds differ.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import os
+import shutil
+import subprocess
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+
+SIGMA_MARKERS = {
+    "fortran": "Integrated cross section",
+    "py_cpu": "sigma (MC)",
+    "py_gpu": "sigma (MC)",
+}
+
+
+def default_root() -> Path:
+    env = os.environ.get("AAO_SCAN_ROOT")
+    if env:
+        return Path(env)
+    scratch = os.environ.get("SCRATCH", "/tmp")
+    return Path(scratch) / "aao_rad_scan"
+
+
+def load_manifest(root: Path) -> list[dict]:
+    with open(root / "grid" / "manifest.csv", newline="") as fh:
+        return list(csv.DictReader(fh))
+
+
+def run_complete(code: str, run_dir: Path) -> bool:
+    """A run is complete when its final cross section was printed."""
+    out = run_dir / "out.txt"
+    if not out.is_file():
+        return False
+    try:
+        text = out.read_text(errors="replace")
+    except OSError:
+        return False
+    if SIGMA_MARKERS[code] not in text:
+        return False
+    if code == "fortran":
+        return (run_dir / "aao_rad.ntuple").is_file()
+    return (run_dir / "out.npz").is_file()
+
+
+def taskset_prefix(worker: int, pin: bool) -> list[str]:
+    """Pin one worker to one core so many concurrent jax processes do not each
+    spawn a full-node thread pool."""
+    if not pin or shutil.which("taskset") is None:
+        return []
+    return ["taskset", "-c", str(worker % (os.cpu_count() or 1))]
+
+
+def build_job(
+    run: dict, code: str, root: Path, repo: Path, python: str, pin: bool, worker: int, gpus: int
+) -> tuple[list[str], dict, Path, Path | None]:
+    """Assemble (command, env, run_dir, stdin_path) for one run."""
+    run_dir = root / code / run["run_id"]
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    card = run_dir / "run_card.txt"
+    if not card.is_file():
+        shutil.copy(root / "grid" / f"{run['cfg_id']}.txt", card)
+
+    env = dict(os.environ)
+
+    if code == "fortran":
+        binary = repo / "bin" / "aao_rad_lund"
+        if not binary.is_file():
+            sys.exit(f"fortran binary missing: {binary} (build the repo first)")
+        link = run_dir / "spp_tbl"
+        if not link.exists():
+            link.symlink_to(repo / "parms" / "spp_tbl")
+        env["AAO_TRIALS"] = "0"
+        cmd = taskset_prefix(worker, pin) + [str(binary)]
+        return cmd, env, run_dir, card
+
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(repo / "src"), env["PYTHONPATH"]] if env.get("PYTHONPATH") else [str(repo / "src")]
+    )
+    env["OMP_NUM_THREADS"] = "1"
+    if gpus:
+        vis = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+        devices = vis.split(",") if vis else [str(i) for i in range(gpus)]
+        env["CUDA_VISIBLE_DEVICES"] = devices[worker % len(devices)]
+    else:
+        env["JAX_PLATFORMS"] = "cpu"
+
+    cmd = taskset_prefix(worker, pin) + [
+        python,
+        "-m",
+        "aao_rad.cli",
+        "--legacy-input",
+        str(card),
+        "--parms",
+        str(repo / "parms"),
+        "--n-events",
+        run["n_events"],
+        "--seed",
+        run["seed"],
+        "--ek-sampling",
+        "fortran",
+        "--format",
+        "npz",
+        "-o",
+        str(run_dir / "out.npz"),
+    ]
+    return cmd, env, run_dir, None
+
+
+def execute(job: tuple[list[str], dict, Path, Path | None]) -> tuple[str, int, float]:
+    cmd, env, run_dir, stdin_path = job
+    t0 = time.time()
+    stdin_fh = open(stdin_path, "rb") if stdin_path else subprocess.DEVNULL
+    try:
+        # stdout and stderr share one file: the port prints its final stats
+        # block to stderr, the Fortran prints to stdout, and both codes'
+        # "run is complete" marker lives in this one file.
+        with open(run_dir / "out.txt", "wb") as out:
+            proc = subprocess.run(
+                cmd, env=env, stdin=stdin_fh, stdout=out, stderr=subprocess.STDOUT
+            )
+    finally:
+        if stdin_path:
+            stdin_fh.close()
+    return run_dir.name, proc.returncode, time.time() - t0
+
+
+def md5(path: Path) -> str:
+    h = hashlib.md5()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def run_all(args, runs: list[dict], root: Path, repo: Path) -> int:
+    gpus = args.gpus
+    workers = args.jobs or (gpus if gpus else os.cpu_count() or 1)
+    pending = [r for r in runs if not run_complete(args.code, root / args.code / r["run_id"])]
+    print(
+        f"{args.code}: {len(runs) - len(pending)}/{len(runs)} complete already, "
+        f"{len(pending)} to run, {workers} workers"
+    )
+
+    if args.dry_run:
+        for run in pending[:3]:
+            job = build_job(run, args.code, root, repo, args.python, args.pin_cpu, 0, gpus)
+            print("would run:", " ".join(job[0]))
+        return 0
+
+    failures: list[str] = []
+    t0 = time.time()
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            pool.submit(
+                execute, build_job(run, args.code, root, repo, args.python, args.pin_cpu, i, gpus)
+            ): run["run_id"]
+            for i, run in enumerate(pending)
+        }
+        done = 0
+        for fut in as_completed(futures):
+            name, rc, dt = fut.result()
+            done += 1
+            if rc != 0:
+                failures.append(name)
+            if done % 20 == 0 or rc != 0:
+                print(
+                    f"  [{done}/{len(pending)}] {name}: {'ok' if rc == 0 else f'EXIT {rc}'} ({dt:.0f}s)"
+                )
+
+    print(
+        f"{args.code}: {len(pending) - len(failures)} finished in {time.time() - t0:.0f}s, "
+        f"{len(failures)} failures"
+    )
+    for name in failures:
+        print(f"  FAILED: {name}")
+    return 1 if failures else 0
+
+
+def check_collisions(runs: list[dict], root: Path, repo: Path) -> int:
+    """md5-compare the runs of each configuration; re-run collided pairs one at
+    a time so their unixtime seeds differ."""
+    pairs: dict[str, list[dict]] = {}
+    for run in runs:
+        pairs.setdefault(run["cfg_id"], []).append(run)
+
+    collided = []
+    for cfg_id, group in sorted(pairs.items()):
+        checksums = []
+        for run in group:
+            ntp = root / "fortran" / run["run_id"] / "aao_rad.ntuple"
+            if ntp.is_file():
+                checksums.append((run["run_id"], md5(ntp)))
+        if len(checksums) >= 2 and len({h for _, h in checksums}) < len(checksums):
+            collided.append(cfg_id)
+            print(f"seed collision in {cfg_id}: " + ", ".join(f"{n}={h[:8]}" for n, h in checksums))
+
+    if not collided:
+        print("no seed collisions")
+        return 0
+
+    print(f"re-running {len(collided)} collided configurations sequentially")
+    for cfg_id in collided:
+        for run in pairs[cfg_id]:
+            run_dir = root / "fortran" / run["run_id"]
+            (run_dir / "aao_rad.ntuple").unlink(missing_ok=True)
+            (run_dir / "out.txt").unlink(missing_ok=True)
+        for run in pairs[cfg_id]:
+            job = build_job(run, "fortran", root, repo, sys.executable, False, 0, 0)
+            _, rc, dt = execute(job)
+            print(f"  {run['run_id']}: exit {rc} ({dt:.0f}s)")
+            time.sleep(2.0)
+    return 0
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    p.add_argument("--code", required=True, choices=tuple(SIGMA_MARKERS))
+    p.add_argument("--root", type=Path, default=None)
+    p.add_argument(
+        "--repo",
+        type=Path,
+        default=None,
+        help="repo root holding src/, bin/ and parms/ (default: two levels up)",
+    )
+    p.add_argument(
+        "--python", default=sys.executable, help="python for the port runs (a venv with jax)"
+    )
+    p.add_argument(
+        "--jobs",
+        type=int,
+        default=0,
+        help="parallel workers (default: cpu count, or --gpus for py_gpu)",
+    )
+    p.add_argument("--gpus", type=int, default=0, help="for --code py_gpu: one worker per GPU")
+    p.add_argument(
+        "--pin-cpu", action="store_true", help="taskset each worker to one core (CPU batches)"
+    )
+    p.add_argument(
+        "--check-collisions",
+        action="store_true",
+        help="fortran: md5-compare same-configuration pairs, re-run collisions",
+    )
+    p.add_argument("--dry-run", action="store_true")
+    args = p.parse_args()
+
+    root = args.root or default_root()
+    repo = args.repo or Path(__file__).resolve().parent.parent.parent
+    runs = load_manifest(root)
+
+    if args.check_collisions:
+        return check_collisions(runs, root, repo)
+    return run_all(args, runs, root, repo)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
