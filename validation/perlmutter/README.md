@@ -47,8 +47,8 @@ grid, and submits four jobs:
 | job | nodes | what |
 |---|---|---|
 | `run_fortran.sbatch` | 1 PM-CPU | 192 runs, one process per core, then an md5 seed-collision check |
-| `run_py_cpu.sbatch` | 1 PM-CPU | 192 runs from one process, XLA's pool spanning the node |
-| `run_py_gpu.sbatch` | 1 PM-GPU | 192 runs from 4 processes, one per A100 |
+| `run_py_cpu.sbatch` | 1 PM-CPU | 192 runs from 128 processes × 2 cores, the measured layout |
+| `run_py_gpu.sbatch` | 1 PM-GPU | 192 runs from 2 processes, one per A100 — the node has 4 GPUs but only 64 cores and the QoS wants 32 cores per GPU, so asking for 4 is refused |
 | `run_verify.sbatch` | 1 PM-CPU | verification, after the three above (`--dependency=afterok`) |
 
 Individual arms can be (re)submitted on their own, and every batch is resumable
@@ -83,7 +83,7 @@ each one a slice of the allocation (XLA sizes its thread pool from
 |---|---|---|
 | fortran | 128 processes × 1 core | the original is serial Fortran with no OpenMP, so a core is all a run can use |
 | py_cpu | 128 processes × 2 cores | measured: threads scale to only ~4×, so many processes beat one wide one |
-| py_gpu | 4 processes × 32 threads | one per A100, splitting the node's affinity entries evenly |
+| py_gpu | 2 processes × 64 threads | one per A100, splitting the node's affinity entries evenly |
 
 `calibrate.sbatch` measures the CPU choice rather than assuming it: it times one
 real run at 1, 2, 4 … 128 threads and projects the wall time of every candidate

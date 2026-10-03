@@ -20,11 +20,16 @@
 # Slurm does not expand $SCRATCH here -- --output is read at submit time, before any
 # of this script's own setup -- so the path is spelled out.  It cannot be $HOME or
 # /tmp either: $HOME is 74% full, and /tmp is not shared with the compute nodes.
+# A PM-GPU node has 4 A100s but only 64 cores, and the gpu_shared_ss11 QoS
+# requires 32 cores per GPU.  Asking for all 4 therefore needs 128 cores and is
+# refused outright ("requires you to request 32.0 cores per GPU, job requested 64
+# cores for 4 GPUs"), so this takes 2 of the node's 4 GPUs and all 64 cores.
+# Everything left idle is the other 2 GPUs -- unavoidable on a node this shape.
 #SBATCH --constraint=gpu
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=64
-#SBATCH --gpus=4
+#SBATCH --gpus=2
 #SBATCH --time=2-00:00:00
 
 set -euo pipefail
@@ -70,12 +75,14 @@ export JAX_COMPILATION_CACHE_DIR="$ROOT/jax_cache"
 # every process would try to reserve most of every visible device.
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
-GPUS=4
+# Must match --gpus above; override both together with AAO_GPUS if the node shape
+# or the QoS ever allows more.
+GPUS=${AAO_GPUS:-2}
 "$PY" "$HERE/make_grid.py" --root "$ROOT"
 
 # One process per GPU, each restricted to an equal share of the node's affinity
-# entries so the four processes do not oversubscribe it.  nproc is the right
-# divisor here (unlike in run_fortran.sbatch) precisely because we want to split
-# every hardware thread between the jobs, not to give each job its own cores.
+# entries so the processes do not oversubscribe it.  nproc is the right divisor
+# here (unlike in run_fortran.sbatch) precisely because we want to split every
+# hardware thread between the jobs, not to give each job its own cores.
 "$PY" "$HERE/run_batch.py" --code py_gpu --root "$ROOT" --repo "$REPO" \
   --python "$PY" --gpus "$GPUS" --jobs "$GPUS" --cpus-per-job "$(( $(nproc) / GPUS ))"
