@@ -96,6 +96,19 @@ NTP_EXTRA: tuple[str, ...] = (
 #: which quietly dropped 31% of the events from the histogram and the ratio
 #: panel.  KS is unaffected (it runs on the raw samples) but the per-bin
 #: comparison and the plot both were.
+#: ``(title, n-tuple column, lo, hi, log y)`` for every observable compared.
+#:
+#: The ranges must cover the *whole* support of both samples.  Anything outside
+#: is counted in the ``outside`` column and dropped from the histogram, so a
+#: range that is too narrow does not merely clip a plot -- it quietly changes
+#: the comparison.  ``phi_k`` was originally plotted over [-30, 360] when it
+#: spans [-180, 180] and threw away 31.5% of the events.
+#:
+#: ``mm^2`` and ``q0`` are a little wider than their physical windows on
+#: purpose.  The missing-mass cut is applied to the *pre-exit* electron energy
+#: (aao_rad.f90:905-916) but the recorded column comes from the final state,
+#: which uses the post-exit energy, so a handful of events land just outside
+#: the cut window.  Two in 200k for ``mm^2``, one for ``q0``.
 OBSERVABLES: tuple[tuple[str, str, float, float, bool], ...] = (
     ("E_s (GeV)", "es", 3.9, 4.25, False),
     ("E' (GeV)", "ep", 1.55, 2.95, False),
@@ -107,10 +120,10 @@ OBSERVABLES: tuple[tuple[str, str, float, float, bool], ...] = (
     ("cos(theta*)", "csthcm", -1.0, 1.0, True),
     ("phi* (deg)", "phicm", 0.0, 360.0, False),
     ("E_gamma (GeV)", "eg", 0.0, 0.6, True),
-    ("mm^2 (GeV^2)", "mm2", 0.6, 1.1, True),
+    ("mm^2 (GeV^2)", "mm2", 0.65, 1.15, True),
     ("cos(theta_k)", "cstk", -1.0, 1.0, True),
     ("phi_k (deg)", "phik", -180.0, 180.0, False),
-    ("q0 (GeV)", "q0", 1.1, 2.7, True),
+    ("q0 (GeV)", "q0", 1.0, 2.75, True),
     ("cos(theta_e)", "csthe", 0.4, 1.0, True),
     ("asym_p", "asym_p", -0.9, 0.9, True),
 )
