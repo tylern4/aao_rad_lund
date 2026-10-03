@@ -1,14 +1,13 @@
 #!/bin/bash
-# JAX-on-GPU arm of the Perlmutter scan: one process per A100 (4 on a PM-GPU
-# node), each pinned to its device and given a quarter of the host cores for the
-# host side of the work.
+# JAX-on-GPU arm of the Perlmutter scan: one process per A100, each pinned to its
+# device and given half the host cores for the host side of the work.
 #
 # Needs the venv built by submit_all.sh (jax[cuda12]).
 #
-# A PM-GPU node has 64 cores / 128 threads and 4 A100s, and Slurm counts cores
-# here: asking for all 4 GPUs means the whole node, so 64 cores is the matching
-# request.  (A PM-CPU node is 128 cores / 256 threads, which is why the CPU arms
-# ask for 128.)
+# A PM-GPU node has 64 cores / 128 threads and 4 A100s.  The gpu_shared_ss11 QoS
+# charges 32 cores per GPU, so 4 GPUs would need 128 cores and the request is
+# refused; 2 GPUs with 64 cores is what the node can actually satisfy.  (A PM-CPU
+# node is 128 cores / 256 threads, which is why the CPU arms ask for 128.)
 
 # Account m3792's default path lands in the `debug` QoS, whose wall limit is 30
 # minutes -- too short for a 192-run arm.  `shared` allows 2 days on one node,
