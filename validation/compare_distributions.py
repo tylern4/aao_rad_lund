@@ -469,6 +469,20 @@ def main() -> int:
     ap.add_argument("--csv", type=Path, default=VALIDATION / "distributions.csv")
     ap.add_argument("--bins-csv", type=Path,
                     default=VALIDATION / "distributions_bins.csv")
+    ap.add_argument("--port-npz", type=Path, default=None,
+                    help="cache the generated port sample here (.npz). On a "
+                         "second run the sample is loaded instead of "
+                         "regenerated -- the port draw is the expensive part "
+                         "and, with a fixed --seed, identical every time. "
+                         "The cache records the card, seed, event count and "
+                         "batch size, and refuses to load a sample generated "
+                         "under different ones.")
+    ap.add_argument("--fortran-sigma", type=float, default=None,
+                    help="the Fortran run's integrated cross section in "
+                         "micro-barns -- the second number on the last "
+                         "'Integrated cross section' line of its out.txt, or "
+                         "the pooled value from reference_fleet.py. Prints "
+                         "the port/Fortran sigma ratio after the tables.")
     args = ap.parse_args()
 
     import matplotlib
@@ -490,8 +504,37 @@ def main() -> int:
           f"epirea={int(card['epirea'])}, delta={card['delta']}, mm_cut={card['mm_cut']}")
 
     print(f"\nGenerating {args.n_python} Python events on the same card ...")
-    py, stats = generate_python(card, args.n_python, args.seed, args.batch_size)
-    print(f"  {stats.summary()}")
+    cache_meta = {
+        "beam_energy": card["beam_energy"], "q2_min": card["q2_min"],
+        "q2_max": card["q2_max"], "ep_min": card["ep_min"],
+        "ep_max": card["ep_max"], "delta": card["delta"],
+        "mm_cut": card["mm_cut"], "epirea": card["epirea"],
+        "n_events": args.n_python, "seed": args.seed,
+        "batch_size": args.batch_size,
+    }
+    py = stats = None
+    if args.port_npz is not None and args.port_npz.exists():
+        cached = np.load(args.port_npz, allow_pickle=False)
+        if all(f"_{k}" in cached.files and float(cached[f"_{k}"]) == float(v)
+               for k, v in cache_meta.items()):
+            py = {k: cached[k] for k in cached.files if not k.startswith("_")}
+            print(f"  loaded cached sample from {args.port_npz} "
+                  f"(card/seed match)")
+        else:
+            raise SystemExit(
+                f"{args.port_npz} holds a sample generated under a different "
+                "card/seed/count -- delete it or pass a fresh --port-npz path")
+    if py is None:
+        py, stats = generate_python(card, args.n_python, args.seed, args.batch_size)
+        if args.port_npz is not None:
+            args.port_npz.parent.mkdir(parents=True, exist_ok=True)
+            np.savez_compressed(args.port_npz, **py, **{f"_{k}": v for k, v in cache_meta.items()})
+            print(f"  cached sample to {args.port_npz}")
+    if stats is not None:
+        print(f"  {stats.summary()}")
+    else:
+        print(f"  {len(next(iter(py.values())))} events, "
+              f"sampler stats unavailable from cache")
 
     summary: list[dict] = []
     bin_rows: dict[str, list[dict]] = {}
@@ -530,12 +573,16 @@ def main() -> int:
     print_bin_overview(bin_summary_rows)
 
     # sigma is the strongest single-number check available.
-    sigma_f = card.get("sigma_fortran")
+    sigma_f = args.fortran_sigma if args.fortran_sigma is not None else card.get("sigma_fortran")
     print()
-    print(f"port sigma (mean-weight) : {stats.sigma_mc:.6g} micro-barn")
-    if sigma_f:
-        print(f"fortran sigma            : {sigma_f:.6g} micro-barn")
-        print(f"ratio                    : {stats.sigma_mc / sigma_f:.4f}")
+    if stats is not None:
+        print(f"port sigma (mean-weight) : {stats.sigma_mc:.6g} micro-barn")
+        if sigma_f:
+            print(f"fortran sigma            : {sigma_f:.6g} micro-barn")
+            print(f"ratio                    : {stats.sigma_mc / sigma_f:.4f}")
+    else:
+        print("port sigma (mean-weight) : n/a (sample loaded from cache; "
+              "run without --port-npz for the trial-level sigma)")
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     make_figure(OBSERVABLES, py, fr, summary, bin_rows, args.bins,
