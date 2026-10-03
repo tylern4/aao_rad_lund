@@ -7,6 +7,8 @@
 #
 # Needs the venv built by submit_all.sh (AAO_VENV, default $SCRATCH/aao_venv).
 #SBATCH --job-name=aao_py_cpu
+#SBATCH --account=m3792
+#SBATCH --output=slurm_%j.out
 #SBATCH --constraint=cpu
 #SBATCH --nodes=1
 #SBATCH --ntasks=1

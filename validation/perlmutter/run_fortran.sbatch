@@ -7,6 +7,8 @@
 #   sbatch --account=m3792 -o $SCRATCH/aao_rad_scan/logs/fortran_%j.out \
 #          run_fortran.sbatch
 #SBATCH --job-name=aao_fortran
+#SBATCH --account=m3792
+#SBATCH --output=slurm_%j.out
 #SBATCH --constraint=cpu
 #SBATCH --nodes=1
 #SBATCH --ntasks=1

@@ -3,6 +3,8 @@
 # and JAX-GPU batches (submit_all.sh sets the afterok dependency) and writes
 # the statistical comparison under $SCRATCH/aao_rad_scan/verify/.
 #SBATCH --job-name=aao_verify
+#SBATCH --account=m3792
+#SBATCH --output=slurm_%j.out
 #SBATCH --constraint=cpu
 #SBATCH --nodes=1
 #SBATCH --ntasks=1

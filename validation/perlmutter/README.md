@@ -51,9 +51,23 @@ grid, and submits four jobs:
 | `run_py_gpu.sbatch` | 1 PM-GPU | 192 runs from 4 processes, one per A100 |
 | `run_verify.sbatch` | 1 PM-CPU | verification, after the three above (`--dependency=afterok`) |
 
-Individual arms can be (re)submitted with `sbatch` directly; every batch is
-resumable — completed runs are recognised by their final cross-section line
-and skipped.
+Individual arms can be (re)submitted on their own, and every batch is resumable
+— completed runs are recognised by their final cross-section line and skipped.
+
+Through the `nersc` CLI (`nersc submit <remote path>`), which takes only a
+remote path and no other `sbatch` flags, each script carries its own
+`#SBATCH --account` and `#SBATCH --output` directives:
+
+```bash
+nersc submit $SCRATCH/aao_rad_lund/validation/perlmutter/run_py_gpu.sbatch
+nersc jobs --user tylern --command squeue
+nersc job <jobid>
+nersc cancel <jobid>
+```
+
+Slurm's log then lands as `slurm_<jobid>.out` next to the script, whereas
+`submit_all.sh` passes `-o` and puts every arm's output in
+`$SCRATCH/aao_rad_scan/logs/`.
 
 ### Processes and threads
 
@@ -77,8 +91,7 @@ layout.  Run it before the scan and set `run_py_cpu.sbatch`'s `--jobs` /
 `--cpus-per-job` to the winner:
 
 ```bash
-sbatch --account=m3792 -o $SCRATCH/aao_rad_scan/logs/calib_%j.out \
-       validation/perlmutter/calibrate.sbatch
+nersc submit $SCRATCH/aao_rad_lund/validation/perlmutter/calibrate.sbatch
 ```
 
 ## Layout on `$SCRATCH`

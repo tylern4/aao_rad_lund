@@ -5,6 +5,8 @@
 #
 # Needs the venv built by submit_all.sh (jax[cuda12]).
 #SBATCH --job-name=aao_py_gpu
+#SBATCH --account=m3792
+#SBATCH --output=slurm_%j.out
 #SBATCH --constraint=gpu
 #SBATCH --nodes=1
 #SBATCH --ntasks=1

@@ -15,6 +15,8 @@
 #   sbatch --account=m3792 -o $SCRATCH/aao_rad_scan/logs/calib_%j.out \
 #          calibrate.sbatch
 #SBATCH --job-name=aao_calib
+#SBATCH --account=m3792
+#SBATCH --output=slurm_%j.out
 #SBATCH --constraint=cpu
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
