@@ -66,6 +66,12 @@ ROOT=${AAO_SCAN_ROOT:-${SCRATCH:?SCRATCH is not set}/aao_rad_scan}
 PY=${AAO_PYTHON:-${AAO_VENV:-$SCRATCH/aao_venv}/bin/python}
 export PYTHONPATH="$REPO/src${PYTHONPATH:+:$PYTHONPATH}"
 
+# jax is installed from jax[cuda12], so on a CPU node its CUDA plugin raises
+# CUDA_ERROR_NO_DEVICE while initialising.  That is noise -- it falls back to CPU
+# -- but it costs a few seconds per process and fills the per-label logs with a
+# traceback, so pin the platform and keep the measurement clean.
+export JAX_PLATFORMS=cpu
+
 if [ ! -x "$PY" ]; then
   echo "venv python not found at $PY -- run submit_all.sh first" >&2
   exit 1
