@@ -318,15 +318,26 @@ is 0.44%. Quoting a single seed's `sigma` ratio to three decimal places is
 therefore meaningless; the scan is in the history of this branch and the error
 bar is the number to compare against.
 
-Against the two reference runs available, the port sits at
+Against the three reference runs available, the port sits at
 
 | reference | events | `sigma` | port ratio |
 |---|---|---|---|
-| `frun` | 8000 | 1.5297985e-2 | **0.998 (−0.20% ± 0.18%)** |
+| `frun` (pre-fix) | 8000 | 1.5297985e-2 | **0.998 (−0.20% ± 0.18%)** |
+| `frun_fixed` (post-fix) | 8000 | 1.5298942e-2 | **0.998 (−0.21% ± 0.18%)** |
 | `frun_mm2` | 2000 | 1.5407922e-2 | 0.991 (−0.92% ± 0.18%) |
 
-Those two Fortran runs disagree with *each other* by 0.72%, which is larger than
-the port's own scatter and comparable to the discrepancy being measured. The
+The first two rows are the *same* run card and the same 8000-event target,
+from builds that differ only by the [`asym_p` fix](#a-second-output-only-bug-asym_p),
+and they differ by **0.006%**. `myran` seeds from `unixtime`, so these are
+independent samples, not the same events twice — which makes the agreement
+meaningful rather than tautological. It is the control the fix needs: `asym_p`
+enters the n-tuple only, so a correct fix must leave the cross section untouched,
+and it does. It also calibrates how much of any gap between two 8000-event
+references is run-to-run noise rather than physics.
+
+The widest gap between two Fortran references is 0.72% (`frun` against
+`frun_mm2`), which is larger than the port's own scatter and comparable to the
+discrepancy being measured. The
 honest statement is therefore that **the port and the Fortran agree to within
 the Fortran's own run-to-run scatter**; pinning the residual below that needs a
 reference with enough events that its `sigma` is itself precise, which is the
@@ -362,7 +373,12 @@ what `mcfac` compensates for: if the port sampled them in different proportions
 the weights would be wrong by construction.
 
 At the event level, 200k port events against the 8000-event reference gives a
-noise floor of `1.36 * sqrt(1/200000 + 1/8000) = 0.0154`:
+noise floor of `1.36 * sqrt(1/200000 + 1/8000) = 0.0154`. This table was measured
+against `frun`, the **pre-fix** reference, and is kept as-is because
+`validation/compare_references.py` shows the fix left all 32 other event columns
+unchanged between `frun` and `frun_fixed` — so every row except `asym_p` still
+holds against the current build. Only the `asym_p` row is stale, and it is
+marked:
 
 | observable | KS D | | observable | KS D |
 |---|---|---|---|---|
@@ -373,13 +389,14 @@ noise floor of `1.36 * sqrt(1/200000 + 1/8000) = 0.0154`:
 | `theta_e` | 0.0085 | | `phi*` | 0.0133 |
 | `cos(theta_e)` | 0.0085 | | `W` | 0.0125 |
 | `W_real` | 0.0129 | | `mm^2` | 0.0359 |
-| | | | `asym_p` | 0.0254 |
+| | | | `asym_p` | ~~0.0254~~ *(pre-fix)* |
 | | | | `E_s` | 0.9459 |
 
 Thirteen of the sixteen sit at or below the floor. The three that do not are
-`mm^2` at 2.3x and `asym_p` at 1.6x — both unexplained, both small, and
-`asym_p` at least does not enter the weight, so neither can account for the
-cross-section residual above. `E_s` is the third and is degenerate.
+`mm^2` at 2.3x, `asym_p` at 1.6x — the latter now explained and closed, see below
+— and `E_s`, which is degenerate. None of the three can account for the
+cross-section residual above: `asym_p` and `E_s` never enter the weight, and
+`mm^2` is cut identically on both sides.
 
 Per bin (40 bins each), which is the stricter test — a KS distance can hide a
 compensating pair of errors that per-bin pulls cannot:
@@ -397,15 +414,19 @@ compensating pair of errors that per-bin pulls cannot:
 | `mm^2` | 1/40 | 3.79 | 0.900 / 1.049 / 1.267 |
 | `W_real` | 0/40 | 2.73 | 0.807 / 0.981 / 1.226 |
 | `E_pion` | 0/40 | 2.76 | 0.848 / 1.000 / 1.281 |
-| `asym_p` | **5/40** | **5.30** | 0.153 / **0.709** / 1.059 |
+| `asym_p` | ~~**5/40**~~ *(pre-fix)* | ~~**5.30**~~ *(pre-fix)* | ~~0.153 / **0.709** / 1.059~~ *(pre-fix)* |
 
 `phi*` is the one to look at: it was 12 of 12 bins over 3σ with max abs z = 59
 and a median ratio of 0.761 before the key fix, and is now indistinguishable.
 That is the visible symptom of the bug described below.
 
-`asym_p` is the real remaining outlier — a 29% median offset across 5 bins at
-up to 5.3σ. It is output-only, so it cannot touch the cross section, but it
-should agree and does not.
+`asym_p` was the last row still over 3σ, and it was the *reference* that was
+wrong: `ntp(32)` held an unrelated trial's asymmetry for the whole radiative
+branch. Those struck-through figures are the pre-fix symptom, kept for the
+record. Note also that an aggregate column mixes the soft and radiative
+branches, which is a weaker instrument than splitting them — so the numbers
+that actually close this are the branch-split ones in
+[the `asym_p` write-up](#a-second-output-only-bug-asym_p).
 
 `ref-empty` bins in `validation/distributions_bins.csv` are a binning artifact
 for the two concentrated observables, not a disagreement: `E_gamma` has a mean
@@ -432,15 +453,13 @@ The one substantive lesson from this comparison is in the next section.
 
 ### What is still open
 
-- **The reference limits the cross-section comparison, not the port.** Two
-  Fortran runs 0.72% apart bracket the residual being measured. A single long
-  reference run (or several) settles it; nothing on the port side needs
-  changing.
-- **`asym_p`** is the one real remaining disagreement: a 29% median offset
-  across per-bin ratios, 5 bins at up to 5.3σ. It is output-only and cannot
-  affect the cross section, but it should agree and does not.
-- **`mm^2`** sits at 2.3x the KS floor and 1 bin at 3.8σ. It is the same
-  quantity on both sides — the cut is applied to the pre-exit electron energy
+- **The reference limits the cross-section comparison, not the port.** The
+  widest gap between two Fortran references is 0.72%, and it brackets the
+  residual being measured. A single long reference run (or several) settles it;
+  nothing on the port side needs changing.
+- **`mm^2`** is the last observable still above the floor: 2.3x on KS, and
+  1 bin at 3.8σ. It is the same quantity on both sides — the cut is applied to
+  the pre-exit electron energy
   but the recorded column comes from the final state, which uses the post-exit
   one, and the Fortran does exactly the same (it updates `ep` at
   `aao_rad.f90:1023` and only then calls `missm` again at `:1034`) — and the two
