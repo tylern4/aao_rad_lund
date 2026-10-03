@@ -21,10 +21,12 @@
 #
 #   nersc submit $SCRATCH/aao_rad_lund/validation/perlmutter/calibrate.sbatch
 
-# Account m3792's default path lands in the `debug` QoS, whose wall limit is 30
-# minutes -- too short for a 192-run arm.  `shared` allows 2 days on one node,
-# which is what these jobs need; AAO_QOS overrides it.
-#SBATCH --qos=shared
+# `debug` rather than `shared`, deliberately inverted from the scan arms.  The
+# shared CPU pool is often saturated enough that a 128-core request waits hours,
+# while debug is a 30-minute queue that starts in seconds and still gets the whole
+# node -- the first calibration run this way took 4s to start and got 128 cores.
+# The measurement only has to fit in 30 minutes, which it does at REPEATS=2.
+#SBATCH --qos=debug
 #SBATCH --job-name=aao_calib
 #SBATCH --account=m3792
 #SBATCH --output=/global/u1/t/tylern/aao_%j.out
@@ -32,7 +34,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=128
-#SBATCH --time=01:00:00
+#SBATCH --time=00:28:00
 
 set -euo pipefail
 # Locate the checkout.  $0 is not the script's own path when the job arrives
@@ -75,9 +77,9 @@ EOF
 )
 NCPU=$("$PY" -c 'import os; print(len(os.sched_getaffinity(0)))')
 FIRST=$("$PY" -c 'import os; print(min(os.sched_getaffinity(0)))')
-REPEATS=3
+REPEATS=${AAO_CALIB_REPEATS:-2}
 echo "card   $CARD"
-echo "node   $NCPU cpus, lowest is $FIRST, $REPEATS runs per thread count"
+echo "node   $NCPU cpus in the affinity mask, lowest is $FIRST, $REPEATS runs per thread count"
 echo
 
 # $1 = cpu count, $2 = label.  Prints the per-run seconds, space separated.
