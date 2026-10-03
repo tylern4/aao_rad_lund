@@ -252,12 +252,26 @@ plots. They are not part of the installed package.
 | `compare_sigr.py` | the raw cross section, recovered from the trial dump |
 | `weight_breakdown.py` | the cross section split by branch and importance region |
 | `compare_references.py` | two Fortran n-tuples from one run card — proves a change to the reference was surgical |
+| `reference_fleet.py` | k staggered Fortran runs combined into one trial-weighted cross section with its run-to-run scatter |
 
 The Fortran side needs the instrumented `aao_rad.f90` (the version in this
 branch), which dumps a 32-variable n-tuple plus the per-trial measure to units
 13 and 14. Set `AAO_TRIALS=0` to skip the trial dump (it is ~0.5 GB per 8000
 events and costs about as much wall time as the physics). See
 [Building the Fortran reference](#building-the-fortran-reference).
+
+### Perlmutter scan
+
+`validation/perlmutter/` holds batch jobs for NERSC Perlmutter that sample one
+96-configuration grid — beam energies 2–12 GeV crossed with channel, beam
+polarisation, the explicit photon cut and target thickness, two runs each —
+with all three implementations (Fortran, JAX on CPU, JAX on GPU), then verify
+the statistics at scale: run-to-run scatter per implementation, cross-code
+cross-section ratios in sigmas, and KS distances per observable against the
+two-sample noise floor. `submit_all.sh` builds the venv and the Fortran
+binary, writes the grid and submits all four jobs (verification runs last,
+under an `afterok` dependency). See
+[validation/perlmutter/README.md](validation/perlmutter/README.md).
 
 Reproducing the headline number:
 
@@ -275,6 +289,11 @@ cd -
 python validation/compare_trials.py --trials /tmp/frun_mm2/aao_rad.trials \
        --fortran-ntries 136336902 --fortran-sigma 1.54079217e-02 \
        --tdump 97 --seed 707 --n 16777216
+
+# 3. the long sigma run behind the sigma row below: 32 batches of 16.7M trials
+#    = 5.4e8 trials.  Step 2 is one batch; its sigma is worth 0.4%, this is 0.07%.
+python validation/weight_breakdown.py --n 16777216 --repeats 32 \
+       --fortran-sigma 1.52989417e-02
 ```
 
 which reports
@@ -303,45 +322,53 @@ difference, because accepted events are importance-sampled *by the weight*; the
 trial dump has no importance sampling in it and can. The two factors also have
 very different uncertainties, and conflating them is how a real bug hides:
 
-| factor | port, 6 seeds x 16.7M trials | uncertainty |
+| factor | port vs Fortran | uncertainty |
 |---|---|---|
 | `P(reach)` | +0.075% | 0.02% — a binomial over 16.7M trials |
 | `mean(weight)` | −0.76% | **0.44%** — see below |
-| `sigma` | **−0.20% ± 0.18%** | dominated by `mean(weight)` |
+| `sigma` | **−0.09% ± 0.07%** | dominated by `mean(weight)` |
 
 `P(reach)` is measured to 0.02%. `mean(weight)` is not: the raw cross section
 `sigma_r` spans ten decades, so the variance of its sample mean converges far
-more slowly than `1/N` and the statistic is worth about 0.4% no matter how many
-trials are thrown at it. Across six independent seeds the port gives
-`sigma = 0.0152668 ± 0.0000067` micro-barn, i.e. the port-to-port scatter alone
-is 0.44%. Quoting a single seed's `sigma` ratio to three decimal places is
-therefore meaningless; the scan is in the history of this branch and the error
-bar is the number to compare against.
+more slowly than `1/N` and a 16.7M-trial batch is worth about 0.4% no matter how
+many trials are in it. Six independent seeds give `sigma = 0.0152668` micro-barn
+with a 0.44% seed-to-seed scatter. One seed run 32 times longer (32 x 16.7M =
+5.4e8 trials) gives `sigma = 0.0152855 ± 0.0000107`: a 0.395% between-batch
+scatter, consistent with the seed-to-seed figure, and still **91x** the naive
+Poisson estimate at that trial count. The two agree within 0.6σ. The `sigma` row
+above is the long run; the two factor rows are the single batch reproduced above.
+Quoting one batch's `sigma` ratio to three decimal places is meaningless; the
+error bar is the number to compare against.
 
-Against the three reference runs available, the port sits at
+Against the three reference runs available, the port's long-run `sigma` sits at
 
 | reference | events | `sigma` | port ratio |
 |---|---|---|---|
-| `frun` (pre-fix) | 8000 | 1.5297985e-2 | **0.998 (−0.20% ± 0.18%)** |
-| `frun_fixed` (post-fix) | 8000 | 1.5298942e-2 | **0.998 (−0.21% ± 0.18%)** |
-| `frun_mm2` | 2000 | 1.5407922e-2 | 0.991 (−0.92% ± 0.18%) |
+| `frun` (pre-fix) | 8000 | 1.5297985e-2 | 0.999 (−0.08% ± 0.07%) |
+| `frun_fixed` (post-fix) | 8000 | 1.5298942e-2 | **0.999 (−0.09% ± 0.07%)** |
+| `frun_mm2` | 2000 | 1.5407922e-2 | 0.992 (−0.79% ± 0.07%) |
 
-The first two rows are the *same* run card and the same 8000-event target,
-from builds that differ only by the [`asym_p` fix](#a-second-output-only-bug-asym_p),
-and they differ by **0.006%**. `myran` seeds from `unixtime`, so these are
-independent samples, not the same events twice — which makes the agreement
-meaningful rather than tautological. It is the control the fix needs: `asym_p`
-enters the n-tuple only, so a correct fix must leave the cross section untouched,
-and it does. It also calibrates how much of any gap between two 8000-event
-references is run-to-run noise rather than physics.
+All three are the *same* run card — the files differ only in the event count —
+so every row is a like-for-like comparison and the last row's wider gap is the
+1.4e8-trial reference's own scatter rather than different physics. The first two
+are also builds that differ only by the
+[`asym_p` fix](#a-second-output-only-bug-asym_p), and they differ by **0.006%**.
+`myran` seeds from `unixtime`, so these are independent samples, not the same
+events twice — which makes the agreement meaningful rather than tautological. It
+is the control the fix needs: `asym_p` enters the n-tuple only, so a correct fix
+must leave the cross section untouched, and it does. It also calibrates how much
+of any gap between two 8000-event references is run-to-run noise rather than
+physics.
 
 The widest gap between two Fortran references is 0.72% (`frun` against
-`frun_mm2`), which is larger than the port's own scatter and comparable to the
-discrepancy being measured. The
-honest statement is therefore that **the port and the Fortran agree to within
-the Fortran's own run-to-run scatter**; pinning the residual below that needs a
-reference with enough events that its `sigma` is itself precise, which is the
-main thing still missing from this validation.
+`frun_mm2`, at 4.7e8 and 1.4e8 trials), which is now ten times the port's own
+standard error on `sigma`. The residual is therefore pinned from the port side
+and what limits the comparison is the reference: **the port and the Fortran
+agree to −0.09% ± 0.07%**, inside the reference's own run-to-run scatter.
+Pushing the residual below that needs several independent references per
+configuration, which is what the
+[Perlmutter scan](validation/perlmutter/README.md) supplies — two runs per
+configuration across 96 of them.
 
 ### Where the distributions differ
 
@@ -455,8 +482,11 @@ The one substantive lesson from this comparison is in the next section.
 
 - **The reference limits the cross-section comparison, not the port.** The
   widest gap between two Fortran references is 0.72%, and it brackets the
-  residual being measured. A single long reference run (or several) settles it;
-  nothing on the port side needs changing.
+  residual being measured. Nothing on the port side needs changing; the long
+  runs that settle it are the Perlmutter scan's
+  ([validation/perlmutter/](validation/perlmutter/README.md)): 192 run jobs
+  per implementation over 96 configurations, with the pooled run-to-run
+  scatter as the honest error bar.
 - **`mm^2`** is the last observable still above the floor: 2.3x on KS, and
   1 bin at 3.8σ. It is the same quantity on both sides — the cut is applied to
   the pre-exit electron energy
@@ -471,7 +501,9 @@ The one substantive lesson from this comparison is in the next section.
   so two Fortran runs disagree with each other. Everything above is
   distributional as a result.
 - **No GPU was available** while this was written, so the batching claims are
-  unmeasured here; only the CPU numbers are.
+  unmeasured here; only the CPU numbers are. The Perlmutter scan's GPU arm
+  (JAX on 4x A100, sharing seeds with the CPU arm so any difference is pure
+  backend floating-point) is the measurement.
 
 ### The shared-key trap
 
