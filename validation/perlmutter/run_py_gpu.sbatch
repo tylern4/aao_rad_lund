@@ -1,13 +1,9 @@
 #!/bin/bash
 # JAX-on-GPU arm of the Perlmutter scan: one process per A100, each pinned to its
-# device and given half the host cores for the host side of the work.
+# device and given an equal share of the node's host threads for the host side of
+# the work.
 #
 # Needs the venv built by submit_all.sh (jax[cuda12]).
-#
-# A PM-GPU node has 64 cores / 128 threads and 4 A100s.  The gpu_shared_ss11 QoS
-# charges 32 cores per GPU, so 4 GPUs would need 128 cores and the request is
-# refused; 2 GPUs with 64 cores is what the node can actually satisfy.  (A PM-CPU
-# node is 128 cores / 256 threads, which is why the CPU arms ask for 128.)
 
 # Account m3792's default path lands in the `debug` QoS, whose wall limit is 30
 # minutes -- too short for a 192-run arm.  `shared` allows 2 days on one node,
@@ -19,17 +15,23 @@
 # Slurm does not expand $SCRATCH here -- --output is read at submit time, before any
 # of this script's own setup -- so the path is spelled out.  It cannot be $HOME or
 # /tmp either: $HOME is 74% full, and /tmp is not shared with the compute nodes.
-# A PM-GPU node has 4 A100s but only 64 cores, and the gpu_shared_ss11 QoS
-# requires 32 cores per GPU.  Asking for all 4 therefore needs 128 cores and is
-# refused outright ("requires you to request 32.0 cores per GPU, job requested 64
-# cores for 4 GPUs"), so this takes 2 of the node's 4 GPUs and all 64 cores.
-# Everything left idle is the other 2 GPUs -- unavoidable on a node this shape.
+
+# A PM-GPU node has 4 A100s and 128 hardware threads, and the gpu_shared_ss11
+# QoS charges 32 cores per GPU.  The earlier --cpus-per-task=64 was refused for
+# exactly that reason ("requires you to request 32.0 cores per GPU, job
+# requested 64 cores for 4 GPUs"), and the whole node is precisely the 128 that
+# satisfies it.  So this takes the node whole, all 4 GPUs.
+
 #SBATCH --constraint=gpu
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=64
-#SBATCH --gpus=2
+#SBATCH --exclusive
+#SBATCH --gpus=4
 #SBATCH --time=2-00:00:00
+# No --nodes/--ntasks/--cpus-per-task on purpose.  A probe with no directives at
+# all (debug 59300338) came back with 128 CPUs, 229 GB and
+# CUDA_VISIBLE_DEVICES=0,1,2,3 -- the whole node.  Asking for less is what left
+# the previous attempt with 112 GB, which 2 processes exhausted (59269609,
+# OUT_OF_MEMORY, 95 of 192 runs killed).  --exclusive keeps a co-tenant off the
+# memory as well as off the cores.
 
 set -euo pipefail
 # Locate the checkout.  Neither $0 nor $HOME works when the job arrives through
@@ -75,13 +77,16 @@ export JAX_COMPILATION_CACHE_DIR="$ROOT/jax_cache"
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
 # Must match --gpus above; override both together with AAO_GPUS if the node shape
-# or the QoS ever allows more.
-GPUS=${AAO_GPUS:-2}
+# ever changes.
+GPUS=${AAO_GPUS:-4}
 "$PY" "$HERE/make_grid.py" --root "$ROOT"
 
 # One process per GPU, each restricted to an equal share of the node's affinity
-# entries so the processes do not oversubscribe it.  nproc is the right divisor
-# here (unlike in run_fortran.sbatch) precisely because we want to split every
-# hardware thread between the jobs, not to give each job its own cores.
+# entries so the processes do not oversubscribe it.  Here, unlike in the CPU
+# arms, a run does have use for host threads -- it is feeding a device rather
+# than saturating a core -- so the node's threads are split between the GPUs
+# rather than given one run each.  nproc is read at run time, so this holds
+# whether or not the node is hyperthreaded.
 "$PY" "$HERE/run_batch.py" --code py_gpu --root "$ROOT" --repo "$REPO" \
-  --python "$PY" --gpus "$GPUS" --jobs "$GPUS" --cpus-per-job "$(( $(nproc) / GPUS ))"
+  --python "$PY" --gpus "$GPUS" --jobs "$GPUS" \
+  --cpus-per-job "$(( $(nproc) / GPUS ))"

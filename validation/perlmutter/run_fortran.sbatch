@@ -1,6 +1,6 @@
 #!/bin/bash
 # Fortran arm of the Perlmutter scan: build (if needed), generate the grid,
-# then run every manifest job on one PM-CPU node, one run per core.
+# then run every manifest job on one PM-CPU node, one run per hardware thread.
 #
 # Submit through submit_all.sh (it sets --account and the log paths), or on
 # its own with:
@@ -17,11 +17,18 @@
 # Slurm does not expand $SCRATCH here -- --output is read at submit time, before any
 # of this script's own setup -- so the path is spelled out.  It cannot be $HOME or
 # /tmp either: $HOME is 74% full, and /tmp is not shared with the compute nodes.
+
 #SBATCH --constraint=cpu
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=128
+#SBATCH --exclusive
 #SBATCH --time=2-00:00:00
+# No --nodes/--ntasks/--cpus-per-task on purpose.  Slurm sizes a step from those,
+# and --cpus-per-task=128 does *not* mean a whole node: a probe with no
+# directives at all (debug 59300339) came back with 256 CPUs and 487 GB, so the
+# 128 that an explicit request bought was half the machine.  Asking for nothing
+# gets the whole node, and --exclusive keeps a co-tenant off it -- both the cores
+# this arm wants and the memory its 192 copies of the MAID tables need.  How many
+# cores that is in practice is read at run time from nproc, so the script below
+# does not have to know whether the node is hyperthreaded.
 
 set -euo pipefail
 # Locate the checkout.  Neither $0 nor $HOME works when the job arrives through
@@ -78,17 +85,17 @@ fi
 # relative to CWD) and AAO_TRIALS=0, which keeps the 0.5 GB trial dump off while
 # the event n-tuple is still written -- both handled by run_batch.py.
 #
-# The original is serial Fortran (no OpenMP), so one process per core is the
-# only way to fill the node.  The worker count has to be the number of *cores*,
-# not of affinity entries: `nproc` reports 256 on a --cpus-per-task=128 PM-CPU
-# node, because the mask carries one entry per hardware thread, and 256
-# single-core workers would put two processes on each of the 128 cores, halving
-# the throughput this layout exists to get.  Slurm sets SLURM_CPUS_PER_TASK to
-# the core count it allocated, which is what we want; nproc is only a fallback.
-CORES=${SLURM_CPUS_PER_TASK:-$(nproc)}
-echo "fortran: $CORES workers, one core each (affinity $(nproc) threads)"
+# The original is serial Fortran with no OpenMP, so a run occupies exactly one
+# hardware thread and the only question is how many are in flight.  All of them
+# are: nproc workers, one thread each, which is more than the 192 runs the grid
+# has, so every run is in flight at once.  taskset_prefix cuts the slices from
+# the real mask (it reads each core's thread siblings out of sysfs), so the
+# workers land on distinct hardware threads until the node runs out and then
+# share -- which is what filling the node means when there are more runs than
+# cores.  Handing a run two threads would not help: a run cannot use them.
+echo "fortran: $(nproc) workers, one hardware thread each"
 "$PY" "$HERE/run_batch.py" --code fortran --root "$ROOT" --repo "$REPO" \
-  --jobs "$CORES" --cpus-per-job 1
+  --jobs "$(nproc)" --cpus-per-job 1
 
 # The Fortran seeds myran from unixtime (1 s resolution): guard against two
 # runs of one configuration starting in the same second.

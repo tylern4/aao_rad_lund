@@ -58,10 +58,14 @@
 # themselves and are unaffected -- read those if this one goes quiet.
 #SBATCH --output=/pscratch/sd/t/tylern/aao_rad_scan/logs/aao_calib_%j.out
 #SBATCH --constraint=cpu
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=128
+#SBATCH --exclusive
 #SBATCH --time=00:28:00
+# No --nodes/--ntasks/--cpus-per-task on purpose, for the reason the scan arms
+# give: --cpus-per-task=128 is half a PM-CPU node, not a whole one.  Asking for
+# nothing gets the node whole and --exclusive keeps a co-tenant off it, which
+# matters more here than anywhere -- a competing run would land in the middle of
+# a timing point.  The earlier calibration was measured on 128 of the node's 256
+# hardware threads, and its projection assumed that was the whole node.
 
 set -euo pipefail
 # Locate the checkout.  Neither $0 nor $HOME works when the job arrives through
@@ -126,9 +130,28 @@ print(os.path.join(root, "grid", rows[0]["cfg_id"] + ".txt"))
 EOF
 )
 NCPU=$("$PY" -c 'import os; print(len(os.sched_getaffinity(0)))')
+# ...and how many of those entries are distinct cores.  The two differ wherever
+# the node is hyperthreaded, and the difference is the whole ball game: a run
+# given N threads by taskset_prefix gets them on N *different* cores, so the
+# node's capacity is its core count, not its thread count.
+CORES=$("$PY" -c 'import os, pathlib; mask=os.sched_getaffinity(0); keys=set()
+for c in mask:
+    try:
+        raw=pathlib.Path(f"/sys/devices/system/cpu/cpu{c}/topology/thread_siblings_list").read_text()
+    except OSError:
+        keys.add(c); continue
+    sib=set()
+    for part in raw.strip().split(","):
+        part=part.strip()
+        if not part: continue
+        if "-" in part:
+            lo,hi=part.split("-"); sib.update(range(int(lo),int(hi)+1))
+        else: sib.add(int(part))
+    keys.add(min(sib) if sib else c)
+print(len(keys))')
 FIRST=$("$PY" -c 'import os; print(min(os.sched_getaffinity(0)))')
 echo "card   $CARD"
-echo "node   $NCPU cpus in the affinity mask, lowest is $FIRST"
+echo "node   $NCPU threads in the affinity mask ($CORES cores), lowest is $FIRST"
 echo "timing $CALIB_EVENTS events x $REPEATS per thread count, grid uses $PROD_EVENTS"
 echo "scale  ${THREAD_COUNTS}"
 echo
@@ -137,17 +160,25 @@ echo
 # the word TIMEOUT if the label exceeded LABEL_TIMEOUT.
 one_process() {
   local cpus
-  # Take a slice of the real affinity mask, striding rather than taking the
-  # lowest n: a PM-CPU node's 128 cores are 256 threads, and the lowest 128 of
-  # those are one hardware thread per core with the sibling threads left idle.
-  cpus=$("$PY" - "$1" <<'EOF'
+  # "N threads" has to mean what --cpus-per-job N means to the arm being
+  # calibrated, and that is N *different cores*: taskset_prefix hands CPUs out
+  # round-robin over cores precisely so that no worker is given the other
+  # hyperthread of a core another worker already has.  Striding the mask does
+  # not do that.  On a 256-entry mask a stride of 128 picks entries 0 and 128,
+  # which are the two threads of core 0, so the previous table's "2 threads"
+  # measured one core's two hyperthreads and its "4 threads" measured two cores
+  # -- a different quantity from the one the arm would use, and the reason its
+  # projection came out wrong.  Group by core and take one thread per core.
+  cpus=$("$PY" - "$1" "$HERE" <<'EOF'
 import os, sys
-count = int(sys.argv[1])
-mask = sorted(os.sched_getaffinity(0))
-if count >= len(mask):
-    picked = mask
-else:
-    picked = mask[:: max(1, len(mask) // count)][:count]
+
+sys.path.insert(0, sys.argv[2])
+from run_batch import core_groups
+
+groups = core_groups(sorted(os.sched_getaffinity(0)))
+picked = [g[0] for g in groups[: int(sys.argv[1])]]
+if not picked:
+    sys.exit("no cores in the affinity mask")
 print(",".join(str(c) for c in picked))
 EOF
 )
@@ -186,11 +217,16 @@ EOF
 # Warm the page cache on the MAID tables and pay the compilation once: every
 # process reads them, so timing a cold first run would measure the filesystem
 # rather than the layout.
-echo "warmup: $(one_process "$NCPU" warmup)"
+echo "warmup: $(one_process "$CORES" warmup)"
 echo
 
 for k in $THREAD_COUNTS; do
-  [ "$k" -le "$NCPU" ] || { echo "threads $k: skipped, node has $NCPU"; continue; }
+  # Cores, not threads: one_process takes one hardware thread from each of N
+  # distinct cores, which is what taskset_prefix does and therefore what the arm
+  # under test will actually do.  A count above the core count would start
+  # handing out a second thread of a core already in the slice -- measuring
+  # hyperthreading, which the arms never ask for.
+  [ "$k" -le "$CORES" ] || { echo "threads $k: skipped, node has $CORES cores"; continue; }
   runs=$(one_process "$k" "t$k")
   echo "threads $k: $runs"
   # Record as we go.  A label that timed out is written out as such and dropped
@@ -200,12 +236,12 @@ for k in $THREAD_COUNTS; do
 done
 
 echo
-"$PY" - "$NCPU" "$CALIB_EVENTS" "$PROD_EVENTS" "$RESULTS" <<'EOF'
+"$PY" - "$NCPU" "$CORES" "$CALIB_EVENTS" "$PROD_EVENTS" "$RESULTS" <<'EOF'
 import math, sys
 
-ncpu = int(sys.argv[1])
-calib_events, prod_events = int(sys.argv[2]), int(sys.argv[3])
-results_path = sys.argv[4]
+ncpu, cores = int(sys.argv[1]), int(sys.argv[2])
+calib_events, prod_events = int(sys.argv[3]), int(sys.argv[4])
+results_path = sys.argv[5]
 
 measured = {}
 for line in open(results_path):
@@ -247,25 +283,52 @@ one = steady.get(1)
 if one is None:
     print(f"no 1-thread measurement: no single-thread baseline to compare "
           f"against, and no extrapolated cost below {min(steady)} threads")
-    print(f"scaling {calib_events}-event runs to the grid's {prod_events}")
 else:
     print(f"steady-state run at {calib_events} events, 1 thread: {one:.1f}s")
     print(f"scaled to the grid's {prod_events} events: {one * scale:.1f}s")
+print(f"node: {ncpu} threads, {cores} cores")
 print()
-print(f"{'layout':>14} {'threads':>8} {'waves':>6} {'projected':>10} {'vs 1x1':>8}")
-best = None
-for procs in (1, 2, 4, 8, 16, 32, 64, 128):
-    if procs > ncpu:
-        break
-    threads = max(1, ncpu // procs)
-    total = math.ceil(runs / procs) * interp(threads) * scale
-    gain = f"{one * runs * scale / total:>7.1f}x" if one else f"{'-':>8}"
-    print(f"{procs:>6} x {threads:<4}   {threads:>8} {math.ceil(runs / procs):>6} "
-          f"{total / 60:>9.1f}m {gain}")
-    if best is None or total < best[0]:
-        best = (total, procs, threads)
+
+
+def wall(procs, threads):
+    """Seconds to finish `runs` runs from `procs` processes of `threads` each.
+
+    Two effects, and a layout needs both.  Waves: there are only `runs` of them,
+    so a layout with fewer processes than runs pays for the last partial wave.
+    Contention: `procs * threads` is more slots than the node has cores, and
+    every run in the overfull layout then gets a fraction of the core it asked
+    for.  Ignoring contention is what made the previous projection recommend 128
+    processes x 2 threads -- 256 slots on 128 cores, twice oversubscribed -- as
+    though the extra slots were free.
+    """
+    waves = math.ceil(runs / procs)
+    return waves * interp(threads) * scale * max(1.0, procs * threads / cores)
+
+
+# Every measured thread count is a candidate width, not just the one that fills
+# the node at a given process count: which width wins is not obvious in advance.
+# One row per process count, showing the width that suits it best.
+widths = sorted(k for k in steady if k <= cores)
+print(f"{'procs':>6} {'threads':>8} {'waves':>6} {'slots':>6} {'projected':>10}")
+rows = []
+for procs in (1, 2, 4, 8, 16, 32, 64, 128, runs):
+    if procs > runs and procs > cores:
+        continue
+    total, threads = min((wall(procs, t), t) for t in widths)
+    waves = math.ceil(runs / procs)
+    print(f"{procs:>6} x {threads:<4}   {waves:>6} {procs * threads:>6} "
+          f"{total / 60:>9.1f}m")
+    rows.append((total, procs, threads))
+rows.sort()
 print()
-print(f"best layout: {best[1]} processes x {best[2]} threads "
-      f"({best[0] / 60:.1f} min for {runs} runs)")
-print(f"set run_py_cpu.sbatch: --jobs {best[1]} --cpus-per-job {best[2]}")
+best_total, best_procs, best_threads = rows[0]
+print(f"best layout: {best_procs} processes x {best_threads} threads "
+      f"({best_total / 60:.1f} min for {runs} runs on {cores} cores)")
+if best_procs >= runs:
+    print(f"that is every run in flight at once.  Workers beyond the run count are")
+    print(f"idle, so run_py_cpu.sbatch's default of AAO_CPU_JOBS=$(nproc) already")
+    print(f"gives it -- set AAO_CPU_CPUS={best_threads} and leave the count alone.")
+else:
+    print(f"set run_py_cpu.sbatch: AAO_CPU_JOBS={best_procs} "
+          f"AAO_CPU_CPUS={best_threads}")
 EOF

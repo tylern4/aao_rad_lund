@@ -14,11 +14,14 @@ bookkeeping stay identical between them:
 
 The node layout is processes x threads, and each arm picks its own:
 
-    fortran   one process per core -- the original is serial Fortran with no
-              OpenMP directives, so a core is all a run can use
-    py_cpu    one process, no CPU restriction, so XLA's thread pool spans the
-              whole node
-    py_gpu    one process per GPU, each given a quarter of the host cores
+    fortran   one process per hardware thread -- the original is serial Fortran
+              with no OpenMP directives, so one thread is all a run can use
+    py_cpu    the same: one thread per run with every run in flight.  A run's
+              cost grows faster than the number of cores it is given, so
+              widening one only takes capacity away from a run that has none
+    py_gpu    one process per GPU, each given an equal share of the host
+              threads -- here the threads feed the device rather than saturate
+              a core
 
 Each run is an independent 20k-event batch, so runs are the unit of parallelism
 and the only question a node layout has to answer is how many of them to have in
