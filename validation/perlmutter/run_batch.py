@@ -207,6 +207,13 @@ SEED_STAGGER_SECONDS = 2.0
 _stagger_lock = threading.Lock()
 _stagger_last: dict[str, float] = {}
 
+# Events between progress lines in a port run's out.txt.  See build_job.
+PROGRESS_EVERY = 2000
+
+# Run id the compilation warm-up writes to.  It is not a manifest run id, so it
+# can never be mistaken for one; see warmup_cache.
+WARMUP_RUN_ID = "_warmup"
+
 
 def stagger_seed(code: str, cfg_id: str, gap: float = SEED_STAGGER_SECONDS) -> float:
     """Block until this run of ``cfg_id`` may start without sharing a unixtime
@@ -261,6 +268,12 @@ def build_job(
     env["PYTHONPATH"] = os.pathsep.join(
         [str(repo / "src"), env["PYTHONPATH"]] if env.get("PYTHONPATH") else [str(repo / "src")]
     )
+    # One XLA compilation cache shared by every port run in this scan root.  XLA
+    # keeps no compiled code between processes, so without this each of the 192
+    # runs compiles its own copy of the same two modules.  It lives under the scan
+    # root rather than a run directory because the warm-up that populates it and
+    # the runs that then reuse it do not have to be on the same node.
+    env.setdefault("AAO_JAX_CACHE_DIR", str(root / "jax_cache"))
     # A worker given a slice of the allocation is told the same width in thread
     # counts that its taskset mask gives it in cores.  XLA sizes its pool from the
     # affinity mask, so taskset is what really bounds the port's own loops; the
@@ -299,6 +312,12 @@ def build_job(
         run["seed"],
         "--ek-sampling",
         "fortran",
+        # Without this a run that has stopped making progress is indistinguishable
+        # from one that is merely slow: out.txt stays empty from the pilot all the
+        # way through the sampling loop.  One line per 2000 events is enough to
+        # tell the two apart while a node is saturated.
+        "--progress",
+        str(PROGRESS_EVERY),
         "--format",
         "npz",
         "-o",
@@ -335,10 +354,60 @@ def md5(path: Path) -> str:
     return h.hexdigest()
 
 
+def warmup_cache(args, runs: list[dict], root: Path, repo: Path, gpus: int) -> int:
+    """Compile the jitted modules once, serially, before the fan-out.
+
+    Every port run needs the same compiled modules.  Launched together, each one
+    compiles its own, and on a saturated node that compile is what runs away:
+    186 copies of ``jit_sample`` took 11 minutes apiece before contending with
+    each other.  Compiling once up front costs a few seconds and leaves the
+    fan-out with nothing to compile -- the results land in the shared
+    ``AAO_JAX_CACHE_DIR`` and every later process loads them.
+
+    The warm-up asks for very few events.  The compiled program does not depend
+    on the event count, but the output does, so the warm-up runs under its own
+    id and never writes into a real run's directory -- a short run left in a real
+    directory would satisfy run_complete() and silently stand in for the
+    full-length one.  The Fortran binary is serial C-like code with nothing to
+    compile, so this is skipped for it.
+    """
+    if not args.warmup_events or args.code == "fortran" or not runs:
+        return 0
+
+    warm = dict(runs[0])
+    warm["run_id"] = WARMUP_RUN_ID
+    warm["n_events"] = str(args.warmup_events)
+
+    print(f"warming the XLA cache: one {warm['n_events']}-event run, one process")
+    run_dir = root / args.code / WARMUP_RUN_ID
+    if run_dir.is_dir():
+        shutil.rmtree(run_dir, ignore_errors=True)
+    cmd, env, run_dir, _ = build_job(
+        warm, args.code, root, repo, args.python, args.cpus_per_job, 1, 0, gpus
+    )
+    t0 = time.time()
+    proc = subprocess.run(
+        cmd, env=env, stdin=subprocess.DEVNULL, cwd=run_dir,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    dt = time.time() - t0
+    if proc.returncode != 0:
+        # Not fatal: the fan-out will just compile the modules itself.
+        print(f"  warm-up exited {proc.returncode} after {dt:.0f}s, continuing anyway")
+        print("  " + (proc.stdout or "").strip().replace("\n", "\n  ")[-800:])
+    else:
+        print(f"  warm-up ok in {dt:.0f}s, cache at {env['AAO_JAX_CACHE_DIR']}")
+    return 0
+
+
 def run_all(args, runs: list[dict], root: Path, repo: Path) -> int:
     gpus = args.gpus
     workers = args.jobs or (gpus if gpus else os.cpu_count() or 1)
     pending = [r for r in runs if not run_complete(args.code, root / args.code / r["run_id"])]
+    if args.limit:
+        # Smoke-test aid: run only the first N pending runs, so a short debug job
+        # exercises the real launch path instead of the whole 192-run grid.
+        pending = pending[: args.limit]
     print(
         f"{args.code}: {len(runs) - len(pending)}/{len(runs)} complete already, "
         f"{len(pending)} to run, {workers} workers"
@@ -351,6 +420,8 @@ def run_all(args, runs: list[dict], root: Path, repo: Path) -> int:
             )
             print("would run:", " ".join(job[0]))
         return 0
+
+    warmup_cache(args, pending, root, repo, gpus)
 
     failures: list[str] = []
     t0 = time.time()
@@ -457,6 +528,21 @@ def main() -> int:
         "--check-collisions",
         action="store_true",
         help="fortran: md5-compare same-configuration pairs, re-run collisions",
+    )
+    p.add_argument(
+        "--warmup-events",
+        type=int,
+        default=2000,
+        help="for the port arms: compile the jitted modules once, serially, with a "
+        "throwaway run of this many events before the fan-out, so 192 processes "
+        "do not each compile their own copy. 0 skips it (default: %(default)s)",
+    )
+    p.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="run at most this many of the pending runs, 0 for all of them; a "
+        "smoke-test aid so a short debug job exercises the real launch path",
     )
     p.add_argument("--dry-run", action="store_true")
     args = p.parse_args()

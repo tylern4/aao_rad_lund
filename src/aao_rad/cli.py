@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -187,6 +188,34 @@ def config_from_args(args: argparse.Namespace) -> GeneratorConfig:
     return cfg.merge(**cli)
 
 
+def _configure_jax_cache(jax) -> None:
+    """Point XLA at a persistent compilation cache when AAO_JAX_CACHE_DIR is set.
+
+    XLA compiles every jitted function from scratch in each process that needs
+    it, and nothing is shared between processes.  The scan fans 192 runs out at
+    once, so that meant 192 independent compiles of the same two modules; under
+    that contention a single ``jit_sample`` compile took 11 minutes and the arm
+    never finished (job 59322722).
+
+    With the cache the first process to reach a module pays for the compile and
+    every other one loads the finished executable from disk.  That is what
+    makes the compile movable to a warm-up run that happens before the fan-out:
+    the cache is keyed on the compiled program, not on how many events the run
+    asked for, so a short warm-up populates it for the full-length runs.
+
+    The cache is an optimisation and is never allowed to fail a run -- a
+    read-only or full scratch just means the compile happens the old way.
+    """
+    cache_dir = os.environ.get("AAO_JAX_CACHE_DIR")
+    if not cache_dir:
+        return
+    try:
+        Path(cache_dir).mkdir(parents=True, exist_ok=True)
+        jax.config.update("jax_compilation_cache_dir", cache_dir)
+    except (OSError, ValueError) as exc:
+        print(f"warning: XLA compilation cache disabled ({exc})", file=sys.stderr)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -211,6 +240,8 @@ def main(argv: list[str] | None = None) -> int:
 
     # Imported lazily so that --help and --dump-config do not pay for jax.
     import jax
+
+    _configure_jax_cache(jax)
 
     from .generate import EventGenerator, build_grid
     from .lund import LundWriter

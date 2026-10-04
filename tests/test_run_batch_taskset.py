@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import subprocess
 import sys
 import threading
 import time
@@ -270,7 +271,14 @@ def test_run_all_actually_staggers_before_launching(tmp_path, monkeypatch):
     monkeypatch.setattr(run_batch, "run_complete", lambda code, run_dir: False)
 
     args = argparse.Namespace(
-        code="fortran", gpus=0, jobs=2, cpus_per_job=1, dry_run=False, python=sys.executable
+        code="fortran",
+        gpus=0,
+        jobs=2,
+        cpus_per_job=1,
+        dry_run=False,
+        python=sys.executable,
+        warmup_events=0,
+        limit=0,
     )
     runs = [
         {"run_id": "cfg_000_s0", "cfg_id": "cfg_000", "seed": "1"},
@@ -290,3 +298,258 @@ def test_run_all_actually_staggers_before_launching(tmp_path, monkeypatch):
     for i, entry in enumerate(order):
         if entry.startswith("exec:"):
             assert order[i - 1].startswith("stagger:"), order
+
+
+# --------------------------------------------------------------------------
+# XLA compilation cache, and the warm-up that populates it
+#
+# XLA shares no compiled code between processes, so a 192-run fan-out had each
+# run compile its own copy of the same modules; contending with each other, 186
+# of them took 11 minutes apiece and the arm never finished (job 59322722).  A
+# shared cache plus one serial warm-up is what makes the compile happen once.
+# Both are invisible when they work and silent when they do not, hence tests.
+# --------------------------------------------------------------------------
+
+
+class _FakeJax:
+    """Just enough of jax for _configure_jax_cache."""
+
+    def __init__(self):
+        self.config = self
+        self.updates = {}
+
+    def update(self, name, value):
+        self.updates[name] = value
+
+
+def test_jax_cache_left_alone_when_unset(monkeypatch):
+    from aao_rad import cli
+
+    monkeypatch.delenv("AAO_JAX_CACHE_DIR", raising=False)
+    jax = _FakeJax()
+    cli._configure_jax_cache(jax)
+    assert jax.updates == {}
+
+
+def test_jax_cache_points_xla_at_the_env_dir(monkeypatch, tmp_path):
+    from aao_rad import cli
+
+    cache = tmp_path / "jax_cache"
+    monkeypatch.setenv("AAO_JAX_CACHE_DIR", str(cache))
+    jax = _FakeJax()
+    cli._configure_jax_cache(jax)
+    assert jax.updates == {"jax_compilation_cache_dir": str(cache)}
+    assert cache.is_dir(), "the cache directory must exist before XLA writes to it"
+
+
+def test_jax_cache_failure_does_not_fail_the_run(monkeypatch, tmp_path, capsys):
+    """A read-only or full scratch must cost the compile, not the run."""
+    from aao_rad import cli
+
+    monkeypatch.setenv("AAO_JAX_CACHE_DIR", str(tmp_path / "cache"))
+
+    class _Refuses:
+        def update(self, name, value):
+            raise ValueError("no cache for you")
+
+    jax = _Refuses()
+    jax.config = jax
+    cli._configure_jax_cache(jax)  # must not raise
+    assert "compilation cache disabled" in capsys.readouterr().err
+
+
+def _port_fixture(tmp_path):
+    root = tmp_path / "scan"
+    repo = tmp_path / "repo"
+    (root / "grid").mkdir(parents=True)
+    (repo / "parms").mkdir(parents=True)
+    (root / "grid" / "cfg_000.txt").write_text("card\n")
+    run = {
+        "run_id": "cfg_000_s0",
+        "cfg_id": "cfg_000",
+        "seed": "7",
+        "n_events": "20000",
+    }
+    return root, repo, run
+
+
+def test_port_runs_share_one_cache_under_the_scan_root(tmp_path, monkeypatch):
+    monkeypatch.delenv("AAO_JAX_CACHE_DIR", raising=False)
+    root, repo, run = _port_fixture(tmp_path)
+    _, env, _, _ = run_batch.build_job(
+        run, "py_cpu", root, repo, sys.executable, 1, 4, 0, 0
+    )
+    assert env["AAO_JAX_CACHE_DIR"] == str(root / "jax_cache")
+    assert env["JAX_PLATFORMS"] == "cpu"
+
+
+def test_port_run_honours_an_inherited_cache(tmp_path, monkeypatch):
+    monkeypatch.setenv("AAO_JAX_CACHE_DIR", "/shared/jax_cache")
+    root, repo, run = _port_fixture(tmp_path)
+    _, env, _, _ = run_batch.build_job(
+        run, "py_cpu", root, repo, sys.executable, 1, 4, 0, 0
+    )
+    assert env["AAO_JAX_CACHE_DIR"] == "/shared/jax_cache"
+
+
+def test_fortran_run_gets_no_jax_cache(tmp_path, monkeypatch):
+    """The original has nothing to compile; pointing it at a cache is noise."""
+    monkeypatch.delenv("AAO_JAX_CACHE_DIR", raising=False)
+    root, repo, run = _port_fixture(tmp_path)
+    (repo / "bin").mkdir()
+    (repo / "bin" / "aao_rad_lund").write_text("")
+    (repo / "parms" / "spp_tbl").mkdir()
+    _, env, _, _ = run_batch.build_job(
+        run, "fortran", root, repo, sys.executable, 1, 4, 0, 0
+    )
+    assert "AAO_JAX_CACHE_DIR" not in env
+
+
+def test_port_run_logs_progress(tmp_path, monkeypatch):
+    """Without this a stalled run and a slow one look identical."""
+    monkeypatch.delenv("AAO_JAX_CACHE_DIR", raising=False)
+    root, repo, run = _port_fixture(tmp_path)
+    cmd, _, _, _ = run_batch.build_job(
+        run, "py_cpu", root, repo, sys.executable, 1, 4, 0, 0
+    )
+    i = cmd.index("--progress")
+    assert cmd[i + 1] == str(run_batch.PROGRESS_EVERY)
+
+
+def _warm_args(**kw):
+    base = dict(
+        code="py_cpu",
+        gpus=0,
+        jobs=4,
+        cpus_per_job=1,
+        dry_run=False,
+        python=sys.executable,
+        warmup_events=2000,
+        limit=0,
+    )
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
+def _stub_build_job(monkeypatch, tmp_path, seen):
+    def fake(run, *a, **k):
+        seen["run"] = run
+        return ["python", "-m", "aao_rad.cli"], {"AAO_JAX_CACHE_DIR": "c"}, tmp_path, None
+
+    monkeypatch.setattr(run_batch, "build_job", fake)
+
+
+def test_warmup_uses_a_throwaway_id_and_few_events(tmp_path, monkeypatch):
+    """A short run left in a real run's directory would look complete to
+    run_complete() and silently stand in for the full-length one."""
+    root, repo, run = _port_fixture(tmp_path)
+    seen = {}
+    _stub_build_job(monkeypatch, tmp_path, seen)
+    monkeypatch.setattr(
+        run_batch.subprocess,
+        "run",
+        lambda cmd, **k: subprocess.CompletedProcess(cmd, 0, stdout="ok"),
+    )
+    assert run_batch.warmup_cache(_warm_args(), [run], root, repo, 0) == 0
+    assert seen["run"]["run_id"] == run_batch.WARMUP_RUN_ID
+    assert seen["run"]["n_events"] == "2000"
+    # Same physics as a real run, or the compiled module would not match.
+    assert seen["run"]["seed"] == run["seed"]
+    assert seen["run"]["cfg_id"] == run["cfg_id"]
+
+
+def test_warmup_skipped_for_fortran(tmp_path, monkeypatch):
+    root, repo, run = _port_fixture(tmp_path)
+
+    def explode(*a, **k):
+        raise AssertionError("the serial Fortran binary has nothing to warm up")
+
+    monkeypatch.setattr(run_batch.subprocess, "run", explode)
+    assert run_batch.warmup_cache(_warm_args(code="fortran"), [run], root, repo, 0) == 0
+
+
+def test_warmup_skipped_when_disabled(tmp_path, monkeypatch):
+    root, repo, run = _port_fixture(tmp_path)
+
+    def explode(*a, **k):
+        raise AssertionError("--warmup-events 0 must skip the warm-up")
+
+    monkeypatch.setattr(run_batch.subprocess, "run", explode)
+    assert run_batch.warmup_cache(_warm_args(warmup_events=0), [run], root, repo, 0) == 0
+
+
+def test_warmup_failure_is_not_fatal(tmp_path, monkeypatch, capsys):
+    """Worst case the fan-out compiles the modules itself, which is what it did
+    before the cache existed."""
+    root, repo, run = _port_fixture(tmp_path)
+    _stub_build_job(monkeypatch, tmp_path, {})
+    monkeypatch.setattr(
+        run_batch.subprocess,
+        "run",
+        lambda cmd, **k: subprocess.CompletedProcess(cmd, 1, stdout="boom"),
+    )
+    assert run_batch.warmup_cache(_warm_args(), [run], root, repo, 0) == 0
+    assert "continuing anyway" in capsys.readouterr().out
+
+
+def test_warmup_runs_before_the_fanout(tmp_path, monkeypatch):
+    """Ordering is the whole point: a warm-up after the fan-out is worthless."""
+    root, repo, _ = _port_fixture(tmp_path)
+    runs = [{"run_id": f"cfg_{i:03d}_s0", "cfg_id": f"cfg_{i:03d}", "seed": "1",
+             "n_events": "20000"} for i in range(4)]
+    order = []
+    monkeypatch.setattr(run_batch, "stagger_seed", lambda *a, **k: 0.0)
+    monkeypatch.setattr(run_batch, "run_complete", lambda code, run_dir: False)
+    monkeypatch.setattr(
+        run_batch, "build_job", lambda run, *a, **k: ([run["run_id"]], {}, tmp_path, None)
+    )
+    monkeypatch.setattr(
+        run_batch, "execute",
+        lambda job: (order.append(job[0][0]), (job[0][0], 0, 0.0))[1],
+    )
+
+    def warm(*a, **k):
+        order.append("warmup")
+
+    monkeypatch.setattr(run_batch, "warmup_cache", warm)
+    args = _warm_args(jobs=4)
+    assert run_batch.run_all(args, runs, root, tmp_path) == 0
+    assert order[0] == "warmup", order
+
+
+def test_limit_truncates_the_fanout(tmp_path, monkeypatch):
+    """Lets a 30-minute debug job exercise the real launch path."""
+    monkeypatch.setattr(run_batch, "stagger_seed", lambda *a, **k: 0.0)
+    monkeypatch.setattr(run_batch, "warmup_cache", lambda *a, **k: 0)
+    monkeypatch.setattr(run_batch, "run_complete", lambda code, run_dir: False)
+    done = []
+    monkeypatch.setattr(
+        run_batch, "build_job", lambda run, *a, **k: ([run["run_id"]], {}, tmp_path, None)
+    )
+    monkeypatch.setattr(
+        run_batch, "execute",
+        lambda job: (done.append(job[0][0]), (job[0][0], 0, 0.0))[1],
+    )
+    runs = [{"run_id": f"cfg_{i:03d}_s0", "cfg_id": f"cfg_{i:03d}", "seed": "1"}
+            for i in range(4)]
+    args = _warm_args(code="fortran", jobs=4, warmup_events=0, limit=2)
+    assert run_batch.run_all(args, runs, tmp_path, tmp_path) == 0
+    assert sorted(done) == ["cfg_000_s0", "cfg_001_s0"]
+
+
+def test_limit_zero_runs_everything(tmp_path, monkeypatch):
+    monkeypatch.setattr(run_batch, "stagger_seed", lambda *a, **k: 0.0)
+    monkeypatch.setattr(run_batch, "warmup_cache", lambda *a, **k: 0)
+    monkeypatch.setattr(run_batch, "run_complete", lambda code, run_dir: False)
+    done = []
+    monkeypatch.setattr(
+        run_batch, "build_job", lambda run, *a, **k: ([run["run_id"]], {}, tmp_path, None)
+    )
+    monkeypatch.setattr(
+        run_batch, "execute",
+        lambda job: (done.append(job[0][0]), (job[0][0], 0, 0.0))[1],
+    )
+    runs = [{"run_id": f"cfg_{i:03d}_s0", "cfg_id": f"cfg_{i:03d}", "seed": "1"}
+            for i in range(4)]
+    assert run_batch.run_all(_warm_args(jobs=4), runs, tmp_path, tmp_path) == 0
+    assert len(done) == 4

@@ -66,17 +66,18 @@ if [ ! -x "$PY" ]; then
   exit 1
 fi
 
-# A PM-CPU node hands out 256 hardware threads.  calibrate.sbatch measured what
-# a run does with more than one of them: 35.0 s at 1 thread, 28.8 at 2, 20.2 at
-# 4, and 8.4 at 64.  The per-run cost in *cores* therefore rises as 35.0, 57.6,
-# 80.8, ... core-seconds -- a second thread buys 1.2x of work for 2x the cores.
-# Since runs are the unit of parallelism and the grid has 192 of them, wall time
-# is minimised by spending one core per run and having every run in flight at
-# once: 192 runs x 35.0 core-s / 300 events over 128 cores is ~58 min, against
-# ~78 min for 128 processes x 2 threads (two waves) and ~2 h for 64 x 4.
-# --cpus-per-job 1 also sets every thread knob run_batch.py passes to the child,
-# so the slice and the thread count cannot drift apart.
-echo "affinity $(nproc) threads, one per run, all runs in flight"
+# A PM-CPU node hands out 256 hardware threads, which is 128 cores.  calibrate.sbatch
+# measured what a run does with more than one thread: 35.0 s at 1 thread, 28.8 at
+# 2, 20.2 at 4, and 8.4 at 64.  The per-run cost in *cores* therefore rises as
+# 35.0, 57.6, 80.8, ... core-seconds -- a second thread buys 1.2x of work for 2x the
+# cores -- so runs are the unit of parallelism and each gets exactly one core.
+#
+# One worker per *core*, not per hardware thread.  Asking for $(nproc) put 256
+# runs on 128 cores, which is both oversubscription the calibration says is pure
+# loss and 384 GB of resident JAX processes on a 503 GB node.  taskset_prefix cuts
+# the mask from the real core list, so nproc/2 workers land on 128 distinct cores.
+# 192 runs over 128 workers is 1.5 waves either way, so this costs no wall time.
+echo "affinity $(($(nproc) / 2)) cores, one core per run, --cpus-per-job 1"
 # An inherited XLA_FLAGS could pin the child's intra-op pool to a thread count
 # that contradicts the slice it is given below.
 unset XLA_FLAGS
@@ -86,5 +87,5 @@ unset XLA_FLAGS
 # AAO_CPU_JOBS and AAO_CPU_CPUS override the layout, which is also how a fresh
 # calibration is applied without editing this file.
 "$PY" "$HERE/run_batch.py" --code py_cpu --root "$ROOT" --repo "$REPO" \
-  --python "$PY" --jobs "${AAO_CPU_JOBS:-$(nproc)}" \
+  --python "$PY" --jobs "${AAO_CPU_JOBS:-$(($(nproc) / 2))}" \
   --cpus-per-job "${AAO_CPU_CPUS:-1}"
