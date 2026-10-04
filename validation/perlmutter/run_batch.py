@@ -54,6 +54,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -190,6 +191,39 @@ def taskset_prefix(worker: int, cpus_per_job: int, jobs: int) -> list[str]:
     return ["taskset", "-c", ",".join(str(c) for c in picked)]
 
 
+# The Fortran original seeds myran from unixtime at 1 s resolution and has no way
+# to be told a seed, so two runs of one configuration that start in the same
+# second produce byte-identical output.  That is not hypothetical: with every run
+# in flight at once, 67 of 96 configurations came back with both seeds identical
+# (job 59269588).  A second seed that is really the first seed also throws away
+# half of every configuration's statistics, so it has to be prevented rather than
+# detected -- check_collisions can only report it, and re-running the losers
+# sequentially costs ~40 minutes each.
+#
+# The port is immune (it takes --seed from the manifest), so this only ever
+# delays a Fortran run, and only the second and later runs of any one
+# configuration.  The gap is comfortably more than the 1 s the clock resolves.
+SEED_STAGGER_SECONDS = 2.0
+_stagger_lock = threading.Lock()
+_stagger_last: dict[str, float] = {}
+
+
+def stagger_seed(code: str, cfg_id: str, gap: float = SEED_STAGGER_SECONDS) -> float:
+    """Block until this run of ``cfg_id`` may start without sharing a unixtime
+    second with a sibling run of the same configuration.  Returns the delay
+    actually taken, so a caller (or a test) can see what happened."""
+    if code != "fortran":
+        return 0.0
+    with _stagger_lock:
+        previous = _stagger_last.get(cfg_id)
+        claimed = time.time() if previous is None else max(time.time(), previous + gap)
+        _stagger_last[cfg_id] = claimed
+    delay = claimed - time.time()
+    if delay > 0:
+        time.sleep(delay)
+    return delay
+
+
 def build_job(
     run: dict,
     code: str,
@@ -320,16 +354,18 @@ def run_all(args, runs: list[dict], root: Path, repo: Path) -> int:
 
     failures: list[str] = []
     t0 = time.time()
+
+    def launch(run: dict) -> tuple[str, int, float]:
+        # Before build_job, so the wait is not charged to the run's own timing.
+        stagger_seed(args.code, run["cfg_id"])
+        return execute(
+            build_job(
+                run, args.code, root, repo, args.python, args.cpus_per_job, workers, 0, gpus
+            )
+        )
+
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {
-            pool.submit(
-                execute,
-                build_job(
-                    run, args.code, root, repo, args.python, args.cpus_per_job, workers, i, gpus
-                ),
-            ): run["run_id"]
-            for i, run in enumerate(pending)
-        }
+        futures = {pool.submit(launch, run): run["run_id"] for run in pending}
         done = 0
         for fut in as_completed(futures):
             name, rc, dt = fut.result()

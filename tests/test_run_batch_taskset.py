@@ -15,8 +15,11 @@ the slicing must not depend on which one it gets.
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -182,3 +185,108 @@ def test_core_groups_partitions_the_real_mask():
     flat = [c for group in groups for c in group]
     assert sorted(flat) == sorted(cpus)
     assert all(groups), "no group may be empty"
+
+
+# --- seed stagger -------------------------------------------------------------
+#
+# The Fortran original seeds myran from unixtime at 1 s resolution and cannot be
+# told a seed, so two runs of one configuration that start in the same second
+# produce byte-identical output.  With every run in flight at once that is not an
+# edge case: job 59269588 came back with 67 of 96 configurations having both
+# seeds identical, which also throws away half of each configuration's
+# statistics.  The stagger is the only thing standing between the layout and a
+# silently degenerate seed axis, so it is pinned here.
+
+
+def test_fortran_sibling_runs_are_pushed_ahead_of_each_other():
+    """Two runs of one configuration: the second waits out the gap."""
+    run_batch._stagger_last.clear()
+    assert run_batch.stagger_seed("fortran", "cfg_000", gap=0.05) == pytest.approx(0, abs=0.05)
+    delay = run_batch.stagger_seed("fortran", "cfg_000", gap=0.05)
+    assert delay == pytest.approx(0.05, abs=0.03)
+
+
+def test_unrelated_configurations_do_not_wait_on_each_other():
+    """The gap is per configuration, so it does not serialise the whole batch."""
+    run_batch._stagger_last.clear()
+    assert run_batch.stagger_seed("fortran", "cfg_a", gap=5.0) == pytest.approx(0, abs=0.05)
+    assert run_batch.stagger_seed("fortran", "cfg_b", gap=5.0) == pytest.approx(0, abs=0.05)
+
+
+@pytest.mark.parametrize("code", ["py_cpu", "py_gpu"])
+def test_the_port_is_never_delayed(code):
+    """The port takes --seed from the manifest, so it has nothing to stagger."""
+    run_batch._stagger_last.clear()
+    assert run_batch.stagger_seed(code, "cfg_000", gap=5.0) == 0.0
+    assert run_batch.stagger_seed(code, "cfg_000", gap=5.0) == 0.0
+
+
+def test_a_forced_batch_of_siblings_still_gets_distinct_seconds():
+    """All runs of one configuration launched at once, as the thread pool does.
+
+    Each waits for its own slot, so the k-th is at least (k-1) gaps behind the
+    first -- the property that matters is that no two land in the same second.
+    """
+    run_batch._stagger_last.clear()
+    gap = 0.05
+    delays = []
+    lock = threading.Lock()
+
+    def worker():
+        d = run_batch.stagger_seed("fortran", "cfg_000", gap=gap)
+        with lock:
+            delays.append(d)
+
+    threads = [threading.Thread(target=worker) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    starts = sorted(time.time() - d for d in delays)
+    assert all(b - a >= gap * 0.9 for a, b in zip(starts, starts[1:])), starts
+    assert {round(d, 3) for d in delays} == {round(i * gap, 3) for i in range(4)}
+
+
+def test_gap_exceeds_the_clock_resolution_the_fortran_sees():
+    """unixtime() has 1 s resolution, so anything under it is not a stagger."""
+    assert run_batch.SEED_STAGGER_SECONDS >= 2.0
+
+
+def test_run_all_actually_staggers_before_launching(tmp_path, monkeypatch):
+    """The unit tests above would still pass if the dispatch path forgot to call
+    it, and that is the failure that produced 67 identical seed pairs, so the
+    call itself is pinned: every pending run is staggered, and always before its
+    own execute()."""
+    order: list[str] = []
+    monkeypatch.setattr(run_batch, "stagger_seed", lambda code, cfg: order.append(f"stagger:{cfg}") or 0.0)
+    monkeypatch.setattr(
+        run_batch, "build_job", lambda run, *a, **k: ([f"run-{run['run_id']}"], {}, tmp_path, None)
+    )
+    monkeypatch.setattr(
+        run_batch,
+        "execute",
+        lambda job: (order.append(f"exec:{job[0][0]}"), ("cfg_000_s0", 0, 0.0))[1],
+    )
+    monkeypatch.setattr(run_batch, "run_complete", lambda code, run_dir: False)
+
+    args = argparse.Namespace(
+        code="fortran", gpus=0, jobs=2, cpus_per_job=1, dry_run=False, python=sys.executable
+    )
+    runs = [
+        {"run_id": "cfg_000_s0", "cfg_id": "cfg_000", "seed": "1"},
+        {"run_id": "cfg_000_s1", "cfg_id": "cfg_000", "seed": "2"},
+    ]
+    assert run_batch.run_all(args, runs, tmp_path, tmp_path) == 0
+    assert sorted(order) == [
+        "exec:run-cfg_000_s0",
+        "exec:run-cfg_000_s1",
+        "stagger:cfg_000",
+        "stagger:cfg_000",
+    ], order
+    first_exec = min(i for i, e in enumerate(order) if e.startswith("exec:"))
+    assert first_exec > 0, order
+    # Each run is staggered immediately before its own launch, so every exec is
+    # directly preceded by a stagger (with 2 workers the two interleave).
+    for i, entry in enumerate(order):
+        if entry.startswith("exec:"):
+            assert order[i - 1].startswith("stagger:"), order
