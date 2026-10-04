@@ -5,10 +5,12 @@
 #
 # Needs the venv built by submit_all.sh (jax[cuda12]).
 
-# Account m3792's default path lands in the `debug` QoS, whose wall limit is 30
-# minutes -- too short for a 192-run arm.  `shared` allows 2 days on one node,
-# which is what these jobs need; AAO_QOS overrides it.
-#SBATCH --qos=shared
+# `regular`, not `shared`: a GPU job in `shared` is capped at gres/gpu=2 and
+# node=1, so it can never have the node's four A100s, and it additionally
+# demands exactly 32 cores per GPU -- which is why --exclusive (a whole node, so
+# 128 cores) is refused outright under `shared`.  `regular` has no per-job TRES
+# cap and 2 days of wall, which is what this arm needs.  AAO_QOS overrides it.
+#SBATCH --qos=regular
 #SBATCH --job-name=aao_py_gpu
 #SBATCH --account=m3792
 #SBATCH --output=/pscratch/sd/t/tylern/aao_rad_scan/logs/aao_py_gpu_%j.out
@@ -16,11 +18,8 @@
 # of this script's own setup -- so the path is spelled out.  It cannot be $HOME or
 # /tmp either: $HOME is 74% full, and /tmp is not shared with the compute nodes.
 
-# A PM-GPU node has 4 A100s and 128 hardware threads, and the gpu_shared_ss11
-# QoS charges 32 cores per GPU.  The earlier --cpus-per-task=64 was refused for
-# exactly that reason ("requires you to request 32.0 cores per GPU, job
-# requested 64 cores for 4 GPUs"), and the whole node is precisely the 128 that
-# satisfies it.  So this takes the node whole, all 4 GPUs.
+# A PM-GPU node has 4 A100s and 128 hardware threads, so all four fit under
+# `regular` and this takes the node whole.
 
 #SBATCH --constraint=gpu
 #SBATCH --exclusive

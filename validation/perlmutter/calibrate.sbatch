@@ -36,12 +36,13 @@
 #
 #   nersc submit $SCRATCH/aao_rad_lund/validation/perlmutter/calibrate.sbatch
 #
-# For short experiments this is `debug` rather than `shared`, deliberately
-# inverted from the scan arms.  The shared CPU pool is often saturated enough
-# that a 128-core request waits hours, while debug is a 30-minute queue that
+# For short experiments this is `debug` rather than the `regular` the scan arms
+# use, deliberately.  The regular CPU pool is often saturated enough that a
+# whole-node request waits a long time, while debug is a 30-minute queue that
 # starts in seconds and still gets the whole node -- the first calibration run
-# this way took 4s to start and got 128 cores.  The measurement has to fit in
-# those 30 minutes, which the short runs above are sized to do.
+# this way took 4s to start and got 128 cores, and the corrected run took a few
+# minutes to get all 256 threads to itself.  The measurement has to fit in those
+# 30 minutes, which the short runs above are sized to do.
 #SBATCH --qos=debug
 #SBATCH --job-name=aao_calib
 #SBATCH --account=m3792

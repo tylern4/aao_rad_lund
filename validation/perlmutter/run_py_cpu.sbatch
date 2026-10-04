@@ -7,10 +7,10 @@
 #
 # Needs the venv built by submit_all.sh (AAO_VENV, default $SCRATCH/aao_venv).
 
-# Account m3792's default path lands in the `debug` QoS, whose wall limit is 30
-# minutes -- too short for a 192-run arm.  `shared` allows 2 days on one node,
-# which is what these jobs need; AAO_QOS overrides it.
-#SBATCH --qos=shared
+# `regular`, not `shared`: both allow 2 days, but `shared` caps a job at one
+# node's worth of shared access while `regular` is the project's own allocation
+# and has no per-job TRES cap.  AAO_QOS overrides it.
+#SBATCH --qos=regular
 #SBATCH --job-name=aao_py_cpu
 #SBATCH --account=m3792
 #SBATCH --output=/pscratch/sd/t/tylern/aao_rad_scan/logs/aao_py_cpu_%j.out

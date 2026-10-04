@@ -3,16 +3,17 @@
 # and JAX-GPU batches (submit_all.sh sets the afterok dependency) and writes
 # the statistical comparison under $SCRATCH/aao_rad_scan/verify/.
 
-# Account m3792's default path lands in the `debug` QoS, whose wall limit is 30
-# minutes -- too short for a 192-run arm.  `shared` allows 2 days on one node,
-# which is what these jobs need; AAO_QOS overrides it.
-#SBATCH --qos=shared
+# `regular`, not `shared`, like the three scan arms; AAO_QOS overrides it.
+#SBATCH --qos=regular
 #SBATCH --job-name=aao_verify
 #SBATCH --account=m3792
 #SBATCH --output=/pscratch/sd/t/tylern/aao_rad_scan/logs/aao_verify_%j.out
 # Slurm does not expand $SCRATCH here -- --output is read at submit time, before any
 # of this script's own setup -- so the path is spelled out.  It cannot be $HOME or
 # /tmp either: $HOME is 74% full, and /tmp is not shared with the compute nodes.
+# Unlike the scan arms this one does ask for a size: it is a single process
+# comparing 192 configurations' worth of n-tuples, so it wants a handful of
+# cores, and taking a whole node for it would idle 124 of them.
 #SBATCH --constraint=cpu
 #SBATCH --nodes=1
 #SBATCH --ntasks=1

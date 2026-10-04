@@ -49,6 +49,8 @@ grid, and submits four jobs:
 | `run_fortran.sbatch` | 1 PM-CPU, exclusive | 192 runs, one process per hardware thread, all in flight, then an md5 seed-collision check |
 | `run_py_cpu.sbatch` | 1 PM-CPU, exclusive | 192 runs from `nproc` processes × 1 thread, all in flight |
 | `run_py_gpu.sbatch` | 1 PM-GPU, exclusive | 192 runs from 4 processes, one per A100, 32 host threads each |
+
+All three run in the `regular` QoS — see below for why not `shared`.
 | `run_verify.sbatch` | 1 PM-CPU | verification, after the three above (`--dependency=afterok`) |
 
 None of the three asks Slurm for a node size. `--cpus-per-task=128` looks like
@@ -59,10 +61,27 @@ fit in that either — 256 slots on 64 cores, so every core ran two processes an
 four threads. Asking for nothing gets the whole node, `--exclusive` keeps a
 co-tenant off it, and the scripts read `nproc` at run time rather than assuming
 how many cores that is. On a PM-GPU node the same probe (59300338) returned
-128 CPUs, 229 GB and `CUDA_VISIBLE_DEVICES=0,1,2,3` — which is also the only
-request that satisfies the `gpu_shared_ss11` QoS's 32-cores-per-GPU minimum for
-4 GPUs, and the 112 GB of the previous 2-GPU attempt is what its 2 processes
-exhausted (job 59269609, `OUT_OF_MEMORY`, 95 of 192 runs killed).
+128 CPUs, 229 GB and `CUDA_VISIBLE_DEVICES=0,1,2,3`; the 112 GB of the previous
+2-GPU attempt is what its 2 processes exhausted (job 59269609, `OUT_OF_MEMORY`,
+95 of 192 runs killed).
+
+All four jobs use the **`regular`** QoS, not `shared`. Both allow 2 days, but a
+GPU job in `shared` is capped at `gres/gpu=2,node=1`, so it can never hold the
+node's four A100s, and it additionally demands exactly 32 cores per GPU — which
+is why `--exclusive`, meaning a whole node and so 128 cores, is refused outright
+under `shared` (`Requested node configuration is not available`). `regular` has
+no per-job TRES cap:
+
+```
+regular   2-00:00:00   (no cap)
+shared    2-00:00:00   node=1
+gpu_shared 2-00:00:00  gres/gpu=2,node=1
+debug     00:30:00     node=8
+gpu_debug 00:30:00     node=8
+```
+
+`debug` also grants a whole 4-GPU node, but 30 minutes is far too short for a
+192-run arm, which is why it is kept for `calibrate.sbatch`.
 
 Individual arms can be (re)submitted on their own, and every batch is resumable
 — completed runs are recognised by their final cross-section line and skipped.
@@ -115,40 +134,66 @@ projection reads that file, so a job killed by its wall clock still leaves usabl
 numbers.  A label that exceeds `AAO_CALIB_LABEL_TIMEOUT` (600 s) is recorded as
 `TIMEOUT` and dropped rather than guessed at.
 
-The first table below was measured on `nid004960` with `--cpus-per-task=128`,
-i.e. half a node, and it is kept here only to be corrected — **its thread counts
-are not cores.** The mask carries one entry per hardware thread, and the script
-used to pick a slice by striding it, which on a hyperthreaded node reaches a
-core's second thread before it reaches a second core: checked on the node,
-`sorted(sched_getaffinity(0))[::128]` is entries 0 and 128, which are both
-threads of core 0. So "2 threads" was one core's two hyperthreads and "4 threads"
-was two cores. `--cpus-per-job N` never does that — it round-robins over cores,
-so N threads is N different cores — which means the measurement and the layout
-chosen from it were different quantities, and the `128 processes × 2 threads`
-recommendation that came out of it was 256 slots on 128 cores, twice
-oversubscribed. `one_process` now takes its slice from `run_batch.core_groups`,
-so the two are the same thing by construction.
+The corrected measurement, whole node (256 hardware threads, 128 cores), each
+thread count on a **distinct core** — steady state of two 300-event runs, so the
+compile is not in the number:
+
+| threads (= cores) | 1 | 2 | 4 | 8 | 16 | 32 | 64 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 300-event run (s) | 35.1 | 19.9 | 12.9 | 9.7 | 8.2 | 7.2 | 7.1 |
+| speedup vs 1 thread | 1.0× | 1.8× | 2.7× | 3.6× | 4.3× | 4.9× | 4.9× |
+| core-seconds per run | 35.1 | 39.7 | 51.4 | 77.3 | 131 | 232 | 456 |
+
+The last row decides the layout. Speedup saturates near 5×, but the *cost* does
+not: a second core costs more than the 1.8× it returns, so widening a run is
+strictly worse than giving that core to another run. (The second *hyperthread* of
+a core is a different matter and nearly free — 35.0 s → 28.8 s for the same core
+in the flawed table below — but `taskset_prefix` never hands a run the sibling of
+a core another run already has, so it is not on offer.)
+
+Both CPU arms therefore give every run one thread and keep every run in flight:
+the grid's 192 runs are independent, so there are always more of them than the
+node's 128 cores, and a wider run can only take capacity away from a run that has
+none. `run_fortran.sbatch` cannot use a second thread at all (serial Fortran, no
+OpenMP). The projection now models wave quantisation *and* slot contention, and
+agrees:
+
+```
+ procs  threads  waves  slots  projected
+     1 x 64        192     64    1521.1m
+     2 x 64         96    128     760.5m
+     4 x 32         48    128     386.1m
+     8 x 16         24    128     219.2m
+    16 x 8          12    128     128.8m
+    32 x 4           6    128      85.7m
+    64 x 2           3    128      66.2m
+   128 x 1           2    128      78.0m
+   192 x 1           1    192      58.5m
+```
+
+`run_py_cpu.sbatch` defaults to `AAO_CPU_JOBS=$(nproc) AAO_CPU_CPUS=1`; workers
+beyond the run count are idle, so the count does not need pinning to 192. A
+changed node or grid wants both re-derived rather than carried over.
+
+### The superseded table
+
+The first table was measured on `nid004960` with `--cpus-per-task=128`, i.e.
+half a node, and **its thread counts are not cores.** The mask carries one entry
+per hardware thread, and the script used to pick a slice by striding it, which on
+a hyperthreaded node reaches a core's second thread before it reaches a second
+core: checked on the node, `sorted(sched_getaffinity(0))[::128]` is entries 0
+and 128, which are both threads of core 0. So "2 threads" was one core's two
+hyperthreads and "4 threads" was two cores. `--cpus-per-task` never does that —
+`taskset_prefix` round-robins over cores, so N threads is N different cores —
+which means the measurement and the layout chosen from it were different
+quantities, and the `128 processes × 2 threads` recommendation that came out of
+it was 256 slots on 64 cores. `one_process` now takes its slice from
+`run_batch.core_groups`, so the two are the same thing by construction.
 
 | threads asked for | 1 | 2 | 4 | 8 | 16 | 32 | 64 | 128 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 300-event run (s) | 35.0 | 28.8 | 20.2 | 13.9 | 10.6 | 8.9 | 8.4 | 8.7 |
 | cores those threads actually spanned | 1 | 1 | 2 | 4 | 8 | 16 | 32 | 64 |
-| speedup vs 1 thread | 1.0× | 1.2× | 1.7× | 2.5× | 3.3× | 3.9× | 4.2× | 4.0× |
-
-The last row is the one that matters for a layout: read against the row above
-it, a run's cost in cores was 35.0, 28.8, 40.4, 55.6, 84.8, 142, 269, 557
-core-seconds — the second *hyperthread* is nearly free (35.0 → 28.8 for the same
-core) while every *extra core* costs more than it returns. Widen a run only by
-using both threads of a core it already has, never by taking a core from another
-run.
-
-Both CPU arms therefore give every run one thread and keep every run in flight:
-the grid's 192 runs are independent, so there are always more of them than the
-node has cores, and a wider run can only take capacity away from a run that has
-none. `run_fortran.sbatch` cannot use a second thread at all (serial Fortran,
-no OpenMP). `run_py_cpu.sbatch` defaults to `AAO_CPU_JOBS=$(nproc)
-AAO_CPU_CPUS=1`; a changed node or grid wants those re-derived rather than
-carried over. Re-run `calibrate.sbatch` for the corrected table.
 
 ## Layout on `$SCRATCH`
 
