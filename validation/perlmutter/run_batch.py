@@ -210,6 +210,15 @@ _stagger_last: dict[str, float] = {}
 # Events between progress lines in a port run's out.txt.  See build_job.
 PROGRESS_EVERY = 2000
 
+# Trial budget per requested event for the port arms.  The package default of
+# 200,000 is set for the original's few-tenths-of-a-percent acceptance, but
+# acceptance here is mean(weight)/ceiling over a heavy-tailed integrand, and the
+# grid's slowest configurations need 207,000-231,000 trials per event -- they
+# were aborted a few percent short of their 20,000-event quota.  600,000 leaves
+# ~2.6x headroom over the worst measured config; override with
+# AAO_MAX_TRIALS_PER_EVENT if the grid ever changes.
+MAX_TRIALS_PER_EVENT = int(os.environ.get("AAO_MAX_TRIALS_PER_EVENT", "600000"))
+
 # Run id the compilation warm-up writes to.  It is not a manifest run id, so it
 # can never be mistaken for one; see warmup_cache.
 WARMUP_RUN_ID = "_warmup"
@@ -312,6 +321,11 @@ def build_job(
         run["seed"],
         "--ek-sampling",
         "fortran",
+        # The grid's slowest configurations exceed the package default of
+        # 200,000 trials per event and abort short of their quota; without this
+        # they fail rather than finish slowly.
+        "--max-trials-per-event",
+        str(MAX_TRIALS_PER_EVENT),
         # Without this a run that has stopped making progress is indistinguishable
         # from one that is merely slow: out.txt stays empty from the pilot all the
         # way through the sampling loop.  One line per 2000 events is enough to

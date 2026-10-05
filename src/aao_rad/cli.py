@@ -117,6 +117,9 @@ def build_parser() -> argparse.ArgumentParser:
     adv.add_argument("--weight-max-margin", type=float,
                      help="safety factor on the estimated acceptance ceiling "
                           "(default: %(default)s)")
+    adv.add_argument("--max-trials-per-event", type=int,
+                     help="trial budget per requested event; exceeding it raises "
+                          "rather than emitting a short run (default: %(default)s)")
     adv.add_argument("--k-exp", type=float, help="slope of the photon energy variable")
     adv.add_argument("--region", type=float, nargs=4, metavar=("R1", "R2", "R3", "R4"),
                      help="sizes of the four importance sampling regions")
@@ -180,6 +183,7 @@ def config_from_args(args: argparse.Namespace) -> GeneratorConfig:
         "cos_step": args.cos_step,
         "k_exp": args.k_exp,
         "weight_max_margin": args.weight_max_margin,
+        "max_trials_per_event": args.max_trials_per_event,
         "regions": tuple(args.region) if args.region else None,
         "write_tracks": False if args.two_tracks else None,
     }

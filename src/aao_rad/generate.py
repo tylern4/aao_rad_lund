@@ -926,12 +926,15 @@ class EventGenerator:
 
             # The original ran at a few tenths of a percent acceptance, so the
             # budget has to be generous; this guard is for a genuinely empty
-            # or near-empty phase space, not for the normal case.
-            if n_trials > 200_000 * max(total, 1):
+            # or near-empty phase space, not for the normal case.  Real
+            # configurations reach 231,000 trials per event, so this is a
+            # config field rather than a constant -- see max_trials_per_event.
+            if n_trials > cfg.max_trials_per_event * max(total, 1):
                 raise RuntimeError(
-                    f"acceptance collapsed: {n_done} events from {n_trials} trials "
-                    f"({n_trials / max(n_done, 1):,.0f} trials per event). "
-                    "The kinematic cuts are probably empty for this beam energy."
+                    f"acceptance collapsed: {n_done}/{total} events from {n_trials} "
+                    f"trials ({n_trials / max(n_done, 1):,.0f} trials per event). "
+                    "Either the kinematic cuts are empty for this beam energy, or "
+                    "this configuration needs a larger --max-trials-per-event."
                 )
 
             # Trim the last block so we never emit more events than requested.

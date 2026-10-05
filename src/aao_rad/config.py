@@ -199,6 +199,21 @@ class GeneratorConfig:
     built from *all* trial weights and is never affected either way.
     """
 
+    max_trials_per_event: int = 200_000
+    """Trial budget per requested event, and the guard against empty phase space.
+
+    Acceptance is ``mean(weight) / ceiling``, which for a heavy-tailed
+    integrand is far below the original's few tenths of a percent: on the
+    validation grid the ``pi0``-channel 8-12 GeV configurations needed
+    207,000-231,000 trials per event, so the original 200,000 default cut them
+    off a few percent short of their quota and they aborted instead of
+    finishing.  Raise this for those, or lower ``n_events``.
+
+    It is a backstop, not a tuning knob: a genuinely empty or near-empty phase
+    space still needs orders of magnitude more, so the error it raises names
+    the likely cause rather than silently emitting a short run.
+    """
+
     write_tracks: bool = True
     """Write all ``n_tracks`` particle lines.  The Fortran wrote only two
     track lines while declaring up to four in the header, which produces a
@@ -246,6 +261,8 @@ class GeneratorConfig:
             raise ValueError("batch_size must be at least 1024 to fill the GPU")
         if self.weight_max_margin < 1.0:
             raise ValueError("weight_max_margin must be at least 1")
+        if self.max_trials_per_event < 1:
+            raise ValueError("max_trials_per_event must be at least 1")
         if self.w_max is not None and self.w_max != "clamp":
             if not 1.1 <= float(self.w_max) <= 2.0:
                 raise ValueError(
