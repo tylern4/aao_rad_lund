@@ -103,9 +103,11 @@ FORT_NTRIES_NEG_RE = re.compile(r"ntries, nevent, mcall_max:\s*-\d+")
 FORT_NGEOM_NEG_RE = re.compile(r"ntries, ngeom\s*=\s*-\d+")
 FORT_MISSM_RE = re.compile(r"missm-2")
 
-# The Fortran writes 47 x REAL*8 in a FORTRAN record, which pads the 376-byte
-# payload up to a 800-byte record.
+# The Fortran writes with '(50(1x,es16.8))' (src/aao_rad.f90:1082) over 47
+# items, so one record is 47 x 17 = 799 characters plus a newline.  That arithmetic
+# is a cross-check, not the primary test -- see _count_records.
 FORT_RECORD_BYTES = 800
+FORT_RECORD_ITEMS = 47
 
 
 def default_root() -> Path:
@@ -148,10 +150,34 @@ def defects(code: str, run_dir: Path, text: str, n_events: int) -> list[str]:
 
     ntp = run_dir / "aao_rad.ntuple"
     if ntp.is_file():
-        records = ntp.stat().st_size // FORT_RECORD_BYTES
+        records = count_ntuple_records(ntp)
         if records < n_events:
             out.append(f"short_ntuple({records}<{n_events})")
     return out
+
+
+def count_ntuple_records(path: Path) -> int:
+    """Count Fortran n-tuple records.
+
+    Because the write uses a fixed-width edit descriptor, one record is exactly
+    one physical line, so counting newlines is a record count.  That is used
+    instead of dividing the byte size by 800: the byte-size form is only valid
+    while es16.8 prints to exactly 16 characters, and if it ever does not -- a
+    different exponent width, or a compiler that pads records -- every one of the
+    192 runs reads as short, the whole reference arm silently drops out of the
+    comparison, and the report would present that as an absence of data rather
+    than as a defect in the check.
+
+    Read in chunks: these files are ~16 MB each and there are 192 of them.
+    """
+    lines = 0
+    tail = b"\n"
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            lines += chunk.count(b"\n")
+            tail = chunk[-1:]
+    # A final line with no terminator is still a record.
+    return lines + (0 if tail in (b"\n", b"") else 1)
 
 
 def _last_sigma(text: str) -> str | None:
@@ -281,7 +307,7 @@ def ks_row_set(events_a: dict, events_b: dict, floor: float) -> list[dict]:
     return rows
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -290,7 +316,7 @@ def main() -> int:
         "--floor-c", type=float, default=1.36, help="KS noise-floor multiplier (95%% = 1.36)"
     )
     p.add_argument("--out-dir", type=Path, default=None)
-    args = p.parse_args()
+    args = p.parse_args(argv)
 
     root = args.root or default_root()
     out_dir = args.out_dir or root / "verify"
@@ -299,19 +325,33 @@ def main() -> int:
 
     results = collect(root)
     by_cfg = pairs_by_config(results)
+    # Manifest totals per arm, for a denominator that does not move when runs are
+    # excluded.  collect() re-reads the manifest; this is the same file, counted.
+    n_expected: dict[str, int] = {}
+    with open(root / "grid" / "manifest.csv", newline="") as fh:
+        for _ in csv.DictReader(fh):
+            for code in CODES:
+                n_expected[code] = n_expected.get(code, 0) + 1
 
     print("== completeness")
     for code in CODES:
         n_cfg = sum(len(v) >= 2 for v in by_cfg[code].values())
         n_runs = len(results[code])
-        total = 2 * sum(1 for _ in by_cfg[code])
-        print(f"  {code}: {n_runs}/{total} runs complete, {n_cfg} configurations with both runs")
+        # The expected total comes from the manifest, not from the filtered set:
+        # deriving it from by_cfg would report the denominator as the number of
+        # *usable* configs, so dropping 46 broken runs printed "192/16 complete".
+        expected = n_expected.get(code, 0)
+        usable = sum(len(v) for v in by_cfg[code].values())
+        line = f"  {code}: {n_runs}/{expected} runs complete, {n_cfg} configurations with both runs"
+        if n_runs - usable:
+            line += f", {usable} usable after defect checks"
+        print(line)
 
     # Runs excluded, and why.  Without this the reader cannot tell a genuine
     # disagreement from a reference that could not count its own trials.
     defects = defect_summary(results)
     if any(
-        d for c in CODES for k, n in defects.get(c, {}).items() if k != "clean" and n
+        k != "clean" and n for c in CODES for k, n in defects.get(c, {}).items()
     ):
         print("== excluded as unusable (see the note below)")
         for code in CODES:

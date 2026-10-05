@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "validation" / "
 
 from verify_statistics import (  # noqa: E402
     FORT_RECORD_BYTES,
+    count_ntuple_records,
     defect_summary,
     defects,
     parse_sigma,
@@ -31,12 +32,19 @@ from verify_statistics import (  # noqa: E402
 N_EVENTS = 20_000
 
 
+def ntuple_bytes(records: int) -> bytes:
+    """A fixed-width Fortran record: 47 items of '1x,es16.8' plus a newline."""
+    one = (" " + " ".join("0.12345678E+00" for _ in range(47))).ljust(FORT_RECORD_BYTES - 1)
+    assert len(one) + 1 == FORT_RECORD_BYTES
+    return (one + "\n").encode() * records
+
+
 def write_run(tmp_path: Path, text: str, records: int | None = N_EVENTS) -> Path:
     run_dir = tmp_path / "run"
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "out.txt").write_text(text)
     if records is not None:
-        (run_dir / "aao_rad.ntuple").write_bytes(b"\0" * (records * FORT_RECORD_BYTES))
+        (run_dir / "aao_rad.ntuple").write_bytes(ntuple_bytes(records))
     return run_dir
 
 
@@ -136,3 +144,39 @@ def test_parse_sigma_reports_defects_through_to_the_caller(tmp_path):
     info = parse_sigma("fortran", run_dir, N_EVENTS)
     assert info["defects"], "defects must survive parse_sigma"
     assert info["sigma"] is not None  # the whole problem: a sigma is still printed
+
+
+def test_record_count_does_not_depend_on_the_byte_width(tmp_path):
+    """The count must survive a record that is not 800 bytes wide.
+
+    Dividing the file size by 800 is only right while es16.8 prints to exactly 16
+    characters.  If it ever stops, every run reads as short, the reference arm
+    drops out entirely, and the report calls that missing data rather than a
+    defect in its own check.
+    """
+    ntp = tmp_path / "odd.ntuple"
+    ntp.write_bytes(b"0.5 1.5 2.5\n" * 4242)  # narrow records, no relation to 800
+    assert ntp.stat().st_size % FORT_RECORD_BYTES != 0  # not divisible by the old width
+    assert count_ntuple_records(ntp) == 4242
+
+
+def test_a_full_record_in_the_real_format_counts_as_one(tmp_path):
+    ntp = tmp_path / "real.ntuple"
+    ntp.write_bytes(ntuple_bytes(20_000))
+    assert ntp.stat().st_size == 20_000 * FORT_RECORD_BYTES
+    assert count_ntuple_records(ntp) == 20_000
+
+
+def test_a_truncated_last_record_still_counts(tmp_path):
+    """A run killed mid-write leaves a partial final line; it is still a record,
+    and it is the short_ntuple check's job to notice the run fell short."""
+    ntp = tmp_path / "cut.ntuple"
+    ntp.write_bytes(ntuple_bytes(9) + b" 0.1")  # 9 whole records, then a partial one
+    assert count_ntuple_records(ntp) == 10
+
+
+def test_a_hundred_record_run_reads_as_short_not_as_missing(tmp_path):
+    """The failure mode this guards: 100 records must be 100 short, not 'no file'."""
+    run_dir = write_run(tmp_path, CLEAN, records=100)
+    found = defects("fortran", run_dir, CLEAN, N_EVENTS)
+    assert found == ["short_ntuple(100<20000)"], found
