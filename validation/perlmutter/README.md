@@ -254,6 +254,45 @@ Outputs in `verify/`:
 | `per_observable.csv` | per pair x observable: median/max KS, fraction within floor |
 | `summary.txt` | the overall agreement verdict |
 
+### The reference fails on a quarter of this grid
+
+`verify_statistics.py` drops any run that could not produce a usable answer,
+because averaging those in silently is worse than dropping them: they reported a
+Fortran-vs-GPU sigma ratio spanning **-10.4 to +5.4** with a |z| of 24.8 and
+78% of configurations inside 2 sigma, which reads as a catastrophic port failure
+and is entirely an artifact of the reference.
+
+The cause is in the original, not the port.  `integer*4 ntries` and
+`integer*4 ngeom` (`src/aao_rad.f90:154,158`) are 32-bit.  A configuration that
+needs more than ~2.1e9 trials wraps the counter, and since `ntries` is a *divisor*
+in the cross section the printed value goes **negative** rather than merely
+becoming imprecise — e.g. `cfg_088_s1` reports `-0.150309518` where the port
+reports `0.00687858`.  Such runs also tend to stop short of their event quota.
+
+On this grid, **46 of 192 Fortran runs are unusable**: 29 overflowed counters, 22
+non-positive cross sections, 18 short n-tuple records.  (A run can carry more
+than one.)  That leaves 146 usable runs and **61 of 96 configurations with both
+seeds valid**, so cross-code agreement is measured on 61 configurations, not 96.
+The remaining 35 have no valid cross-code reference and are covered only by the
+CPU-vs-GPU comparison.
+
+`missm-2` is deliberately *not* treated as a defect.  It looks like one — a
+numerical guard printing to stdout — but it is per-event, inside the generation
+loop (`src/aao_rad.f90:1666-1668`): whenever `csthcm**2` rounds just past 1 it
+clamps `snthcm` to 1e-7 and continues.  **167 of the 192** runs print it,
+including runs with a full 20,000-record n-tuple and a healthy positive cross
+section.  Counting it as a defect discarded 167 good runs and left 1 usable
+configuration of 96.
+
+The defect checks live in `verify_statistics.defects()` and are Fortran-only by
+construction — the port has no 32-bit counters and writes its own n-tuple.
+Record counting uses newlines rather than dividing the byte size by 800, so it
+does not depend on `es16.8` continuing to print exactly 16 characters.
+
+With those runs excluded, the Fortran's own run-to-run scatter is **0.137%**,
+against 0.077% for JAX-CPU and 0.070% for JAX-GPU — the same order, which is the
+point: the port's residual noise is the reference's, not extra noise of its own.
+
 ## Notes
 
 * The port runs with `--ek-sampling fortran`, matching the original's
