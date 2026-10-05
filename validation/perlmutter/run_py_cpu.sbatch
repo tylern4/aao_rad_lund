@@ -59,6 +59,15 @@ fi
 HERE="$REPO/validation/perlmutter"
 ROOT=${AAO_SCAN_ROOT:-${SCRATCH:?SCRATCH is not set}/aao_rad_scan}
 PY=${AAO_PYTHON:-${AAO_VENV:-$SCRATCH/aao_venv}/bin/python}
+# Every one of these jobs can be killed at its wall limit, and Python block-buffers
+# stdout when it is not a terminal.  A killed job then loses its own progress
+# reporting -- the '[42/46] cfg_091_s0: ok (102s)' lines that are the only record of
+# which runs finished and which were still in flight.  Unbuffer it for every
+# invocation below, including the `python -m aao_rad.cli` runs: run_batch.py
+# captures each run's output to its own out.txt, but a run killed mid-flight loses
+# whatever its own stdout had not yet flushed, which is exactly the progress lines
+# that distinguish a slow run from a stalled one.
+export PYTHONUNBUFFERED=1
 mkdir -p "$ROOT/logs"
 
 if [ ! -x "$PY" ]; then
