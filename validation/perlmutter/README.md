@@ -293,6 +293,61 @@ With those runs excluded, the Fortran's own run-to-run scatter is **0.137%**,
 against 0.077% for JAX-CPU and 0.070% for JAX-GPU — the same order, which is the
 point: the port's residual noise is the reference's, not extra noise of its own.
 
+### Two measurement artifacts that had to be fixed first
+
+Both were defects in the *verification*, not in the port, and both produced
+alarming-looking numbers until they were identified.
+
+**`missm-2` is not a defect.** See above — counting it discarded 167 good runs
+and left 1 usable configuration of 96.
+
+**KS must run at the precision the reference reports.** KS reported **0.9739** on
+`E_s` for all 16 configurations at `ebeam = 4.244` GeV, which reads as the two
+codes sampling disjoint physics.  It was float representation: `E_s` at that
+beam energy is a point mass (97% of events at exactly 4.244), the Fortran writes
+`es16.8` so it reports `4.24399996`, and the port's npz is float32 so it stores
+`4.24399995803833`.  Two atomic masses 2e-9 apart put the empirical CDFs 97%
+apart.  What identified it: the affected configurations were *exactly* the 16 at
+4.244 GeV, while 2.0, 6.0 and 12.0 — which are exact in binary32 — showed no such
+artifact.  Quantizing to 8 significant digits drops the worst KS from 0.9739 to
+0.041.
+
+### The remaining disagreement is real, and it is energy-dependent
+
+With both artifacts removed, the cross-code cross section still does not agree
+to within Monte Carlo noise.  Comparing the two-seed means, Fortran minus
+JAX-GPU, on the 61 configurations with a valid reference:
+
+| `ebeam` (GeV) | n | median difference |
+|---|---|---|
+| 2.0 | 8 | +0.487% |
+| 4.244 | 13 | +0.114% |
+| 6.0 | 12 | +0.065% |
+| 8.0 | 8 | +0.197% |
+| 10.0 | 10 | +0.620% |
+| 12.0 | 10 | +0.734% |
+
+Overall median +0.28%, mean +0.39%, sd 0.59%, `|d|` p90 1.19%, max 2.34% — against
+a same-code run-to-run median of 0.07%.  So the offset at 10 and 12 GeV is roughly
+ten times the noise: **this is a systematic, not sampling.**
+
+It is *not* polarisation (median +0.279% polarised vs +0.282% unpolarised).  It
+is smallest at 6 GeV and grows toward both ends of the energy range, and every one
+of the eight largest disagreements sits at 10 or 12 GeV.  The `ep` acceptance
+window scales with the beam energy (0.28–0.68 GeV at 2 GeV up to 10.28–10.68 GeV at
+12 GeV), so the extremes probe the hadronic amplitude furthest outside the region
+where it is best constrained — the MAID interpolation is the first place to look.
+**This is unresolved.**  The port is not wrong by a bug-sized margin; it is off by
+a few tenths of a percent in a way that tracks where in kinematics the
+configuration sits.
+
+The same offset shows up in the distributions: 151 of 976 fortran-vs-GPU
+observable checks sit outside the KS noise floor (15.5%, against ~5% expected at
+a 1.36-sigma threshold), with the worst at `mm^2` (KS 0.041).  By contrast
+JAX-CPU vs JAX-GPU — the two port backends, sharing seeds, so pure floating point
+— is 0 of 592 over floor with a cross-section ratio of 1.00049 and a range of
+0.99933 to 1.00343.
+
 ## Notes
 
 * The port runs with `--ek-sampling fortran`, matching the original's
