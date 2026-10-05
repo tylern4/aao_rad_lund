@@ -643,6 +643,22 @@ def finalize(kin: Kinematics, kv, ph, asym, key, n: int):
 # ---------------------------------------------------------------------------
 # Public driver
 # ---------------------------------------------------------------------------
+def _pct(fraction: float) -> str:
+    """Format a fraction as a percentage without collapsing to ``0.000%``.
+
+    Acceptance is ``mean(weight) / ceiling`` against a heavy-tailed integrand,
+    so on the validation grid it spanned 0.0000% to 0.117% -- five orders of
+    magnitude.  A fixed three-decimal format printed the bottom of that range
+    as ``0.000%``, which reads as "no events were accepted" rather than "very
+    few", and hides exactly the variation one compares runs by.  Fall back to
+    scientific notation only where the fixed format would lose the value.
+    """
+    pct = 100.0 * fraction
+    if pct != 0.0 and abs(pct) < 0.001:
+        return f"{pct:.3e}%"
+    return f"{pct:.4f}%"
+
+
 @dataclass
 class GenerationStats:
     """Run diagnostics, reported at the end of a generation."""
@@ -709,8 +725,8 @@ class GenerationStats:
         return (
             f"events           : {self.n_events:,}\n"
             f"trials           : {self.n_trials:,}\n"
-            f"sampling accept. : {100.0 * self.acceptance:.3f}%\n"
-            f"event yield      : {100.0 * self.event_yield:.3f}%\n"
+            f"sampling accept. : {_pct(self.acceptance)}\n"
+            f"event yield      : {_pct(self.event_yield)}\n"
             f"weight max / mean: {self.weight_max:.6g}{clipped} / "
             f"{self.mean_weight:.6g}\n"
             f"above ceiling    : {self.n_above_ceiling:,} trials, "
