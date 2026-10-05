@@ -337,8 +337,13 @@ def main() -> int:
     p.add_argument("--per-energy", type=int, default=2, help="configurations to plot per beam energy")
     p.add_argument("--bins", type=int, default=60, help="bins per observable histogram")
     p.add_argument(
-        "--per-row", type=int, default=2,
-        help="observables placed side by side; 1 gives a single tall column",
+        "--per-row", type=int, default=4,
+        help=(
+            "observables placed side by side.  4 is the default because it is "
+            "the smallest value that keeps a full 16-observable figure about "
+            "as wide as it is tall; 2 leaves it 3.8x taller than wide, which is "
+            "still a scrolling exercise"
+        ),
     )
     p.add_argument("--dpi", type=int, default=110)
     p.add_argument("--floor-c", type=float, default=1.36)
