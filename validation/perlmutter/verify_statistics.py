@@ -96,6 +96,17 @@ FORT_NTRIES_RE = re.compile(r"ntries, nevent, mcall_max:\s*(\d+)\s+(\d+)")
 PORT_SIGMA_RE = re.compile(r"sigma \(MC\)\s*:\s*([0-9.eE+\-]+)")
 PORT_TRIALS_RE = re.compile(r"\(([\d,]+) trials/s\)")
 
+# A signed counter prints as negative once it wraps, and the Fortran declares
+# `integer*4 ntries` / `integer*4 ngeom` (src/aao_rad.f90:154,158).  These are the
+# patterns for a wrapped value; the unsigned ones above cannot match one.
+FORT_NTRIES_NEG_RE = re.compile(r"ntries, nevent, mcall_max:\s*-\d+")
+FORT_NGEOM_NEG_RE = re.compile(r"ntries, ngeom\s*=\s*-\d+")
+FORT_MISSM_RE = re.compile(r"missm-2")
+
+# The Fortran writes 47 x REAL*8 in a FORTRAN record, which pads the 376-byte
+# payload up to a 800-byte record.
+FORT_RECORD_BYTES = 800
+
 
 def default_root() -> Path:
     env = os.environ.get("AAO_SCAN_ROOT")
@@ -105,10 +116,53 @@ def default_root() -> Path:
     return Path(scratch) / "aao_rad_scan"
 
 
-def parse_sigma(code: str, run_dir: Path) -> dict:
+def defects(code: str, run_dir: Path, text: str, n_events: int) -> list[str]:
+    """Reasons this run cannot be used as a reference, most serious first.
+
+    The port is fine on every count here; the checks exist because the *Fortran*
+    fails on about a quarter of this grid, silently, while still printing a
+    plausible-looking cross section.  Two independent causes:
+
+    ``integer*4 ntries`` wraps past 2**31 once a configuration needs more than
+    ~2.1e9 trials, and since that counter is a divisor the printed cross section
+    goes *negative* rather than merely becoming imprecise.  Meanwhile the
+    ``missm-2`` guard (snthcm = 1 - csthcm**2 going negative to rounding) marks
+    runs whose hadronic amplitude evaluated to zero, and those runs also tend to
+    stop short of their event quota.
+
+    Averaging these in silently is worse than dropping them: they produced a
+    reported fortran-vs-py_gpu sigma ratio spanning -10.4 to +5.4 and a
+    |z| of 24.8, which reads as a catastrophic port failure and is entirely an
+    artifact of the reference.
+    """
+    out: list[str] = []
+    if code != "fortran":
+        return out
+
+    if FORT_NTRIES_NEG_RE.search(text) or FORT_NGEOM_NEG_RE.search(text):
+        out.append("counter_overflow")
+    if out[0:] and float(_last_sigma(text) or 0.0) <= 0.0:
+        out.append("non_positive_sigma")
+    if FORT_MISSM_RE.search(text):
+        out.append("missm-2")
+
+    ntp = run_dir / "aao_rad.ntuple"
+    if ntp.is_file():
+        records = ntp.stat().st_size // FORT_RECORD_BYTES
+        if records < n_events:
+            out.append(f"short_ntuple({records}<{n_events})")
+    return out
+
+
+def _last_sigma(text: str) -> str | None:
+    sigs = FORT_SIGMA_RE.findall(text)
+    return sigs[-1][1] if sigs else None
+
+
+def parse_sigma(code: str, run_dir: Path, n_events: int = 0) -> dict:
     """Pull the run's final cross section (micro-barn) and trial count."""
     text = (run_dir / "out.txt").read_text(errors="replace")
-    out: dict = {"sigma": None, "trials": None}
+    out: dict = {"sigma": None, "trials": None, "defects": defects(code, run_dir, text, n_events)}
     if code == "fortran":
         sigs = FORT_SIGMA_RE.findall(text)
         trys = FORT_NTRIES_RE.findall(text)
@@ -145,7 +199,7 @@ def collect(root: Path) -> dict[str, dict[str, dict]]:
             run_dir = root / code / run["run_id"]
             if not (run_dir / "out.txt").is_file():
                 continue
-            info = parse_sigma(code, run_dir)
+            info = parse_sigma(code, run_dir, int(run["n_events"]))
             if info["sigma"] is None:
                 continue
             info["path"] = run_dir
@@ -157,16 +211,35 @@ def collect(root: Path) -> dict[str, dict[str, dict]]:
 
 
 def pairs_by_config(results: dict[str, dict]) -> dict[str, dict[str, list[dict]]]:
-    """{code: {cfg_id: [run, run]}} ordered by seed."""
+    """{code: {cfg_id: [run, run]}} ordered by seed, defective runs excluded.
+
+    A configuration enters the comparison only if *both* of its runs are clean,
+    so a pair is always two like-for-like samples.  Excluding single bad runs
+    would leave an unpaired one that no comparison can use anyway.
+    """
     out: dict[str, dict[str, list[dict]]] = {}
     for code in CODES:
         by_cfg: dict[str, list[dict]] = {}
         for run in results[code].values():
+            if run.get("defects"):
+                continue
             by_cfg.setdefault(run["cfg_id"], []).append(run)
         for cfg in by_cfg:
             by_cfg[cfg].sort(key=lambda r: r["seed"])
         out[code] = by_cfg
     return out
+
+
+def defect_summary(results: dict[str, dict]) -> dict[str, dict[str, int]]:
+    """{code: {defect: n_runs}} over every collected run, for the report."""
+    counts: dict[str, dict[str, int]] = {}
+    for code, runs in results.items():
+        per: dict[str, int] = {}
+        for run in runs.values():
+            for d in run.get("defects") or ("clean",):
+                per[d] = per.get(d, 0) + 1
+        counts[code] = dict(sorted(per.items(), key=lambda kv: -kv[1]))
+    return counts
 
 
 def rel_scatter(by_cfg: dict[str, list[dict]]) -> float:
@@ -233,6 +306,26 @@ def main() -> int:
         n_runs = len(results[code])
         total = 2 * sum(1 for _ in by_cfg[code])
         print(f"  {code}: {n_runs}/{total} runs complete, {n_cfg} configurations with both runs")
+
+    # Runs excluded, and why.  Without this the reader cannot tell a genuine
+    # disagreement from a reference that could not count its own trials.
+    defects = defect_summary(results)
+    if any(
+        d for c in CODES for k, n in defects.get(c, {}).items() if k != "clean" and n
+    ):
+        print("== excluded as unusable (see the note below)")
+        for code in CODES:
+            bad = {k: v for k, v in defects.get(code, {}).items() if k != "clean"}
+            if bad:
+                n_bad = sum(1 for r in results[code].values() if r.get("defects"))
+                detail = ", ".join(f"{k} x{v}" for k, v in bad.items())
+                print(f"  {code}: {n_bad}/{len(results[code])} runs excluded -- {detail}")
+        print(
+            "  the Fortran declares integer*4 ntries, so a configuration needing more\n"
+            "  than 2**31 trials wraps the counter that its cross section divides by and\n"
+            "  reports a negative cross section.  Those runs are dropped, not averaged:\n"
+            "  including them reported a sigma ratio of -10.4 to +5.4 against the port."
+        )
 
     # ---- like-for-like: run-to-run scatter and KS within each code
     scatter = {code: rel_scatter(by_cfg[code]) for code in CODES}

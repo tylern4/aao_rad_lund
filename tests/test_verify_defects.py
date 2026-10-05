@@ -1,0 +1,138 @@
+"""The verifier must refuse to average in a reference that could not count.
+
+The Fortran declares ``integer*4 ntries`` / ``integer*4 ngeom``, so a
+configuration needing more than 2**31 trials wraps the counter its cross
+section divides by and prints a *negative* sigma -- while still looking like a
+finished run.  On this grid that happened to 46 of 192 runs, and including them
+reported a fortran-vs-py_gpu sigma ratio spanning -10.4 to +5.4 with a |z| of
+24.8: indistinguishable from a catastrophic port failure, and entirely an
+artifact of the reference.
+
+These tests pin the gate using the actual log signatures, including the one
+that matters most -- an overflowed run that still prints a plausible sigma.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "validation" / "perlmutter"))
+
+from verify_statistics import (  # noqa: E402
+    FORT_RECORD_BYTES,
+    defect_summary,
+    defects,
+    parse_sigma,
+)
+
+N_EVENTS = 20_000
+
+
+def write_run(tmp_path: Path, text: str, records: int | None = N_EVENTS) -> Path:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "out.txt").write_text(text)
+    if records is not None:
+        (run_dir / "aao_rad.ntuple").write_bytes(b"\0" * (records * FORT_RECORD_BYTES))
+    return run_dir
+
+
+CLEAN = """\
+  ntries, ngeom =   152553895   111206141
+  ntries, nevent, mcall_max:    211748729       20000           2
+  Integrated cross section (MC, numerical) =   6.58308296E-03   6.58196583E-03  mu-barns
+"""
+
+# integer*4 wrapped past 2**31, so the counter sigma divides by is negative.
+OVERFLOWED = """\
+  ntries, ngeom =   2117483647   111206141
+  ntries, ngeom =  -382487988 -1006273173
+  ntries, nevent, mcall_max:   -382487988        8800           1
+  Integrated cross section (MC, numerical) =  -1.50309518E-01  -1.50309518E-01  mu-barns
+  missm-2: snthcm =   0.00000000
+"""
+
+
+def test_a_clean_fortran_run_has_no_defects(tmp_path):
+    run_dir = write_run(tmp_path, CLEAN)
+    assert defects("fortran", run_dir, CLEAN, N_EVENTS) == []
+
+
+def test_a_clean_run_parses(tmp_path):
+    run_dir = write_run(tmp_path, CLEAN)
+    info = parse_sigma("fortran", run_dir, N_EVENTS)
+    # sig_sum is the second capture group, per parse_sigma.
+    assert info["sigma"] == pytest.approx(6.58196583e-03)
+    assert info["trials"] == 211748729
+    assert info["defects"] == []
+
+
+def test_counter_overflow_is_caught(tmp_path):
+    """The wrapped ntries prints with a leading minus the unsigned regex misses."""
+    run_dir = write_run(tmp_path, OVERFLOWED, records=8800)
+    found = defects("fortran", run_dir, OVERFLOWED, N_EVENTS)
+    assert "counter_overflow" in found
+    assert "non_positive_sigma" in found
+
+
+def test_overflow_is_caught_even_when_the_ntuple_is_full(tmp_path):
+    """The dangerous case: a full 20,000-record n-tuple and a sigma that still
+    looks like a number.  Only the counter reveals the wrap."""
+    text = CLEAN.replace("211748729", "-382487988").replace(
+        "6.58308296E-03", "6.58308296E-03"
+    )
+    run_dir = write_run(tmp_path, text)
+    found = defects("fortran", run_dir, text, N_EVENTS)
+    assert "counter_overflow" in found
+    # A positive sigma means the sign check cannot be what caught it.
+    assert "non_positive_sigma" not in found
+
+
+def test_short_ntuple_is_caught(tmp_path):
+    run_dir = write_run(tmp_path, CLEAN, records=9577)
+    found = defects("fortran", run_dir, CLEAN, N_EVENTS)
+    assert any(d.startswith("short_ntuple") for d in found), found
+    assert any("9577" in d for d in found), found
+
+
+def test_missm_is_caught(tmp_path):
+    text = CLEAN + "  missm-2: snthcm =   0.00000000\n"
+    run_dir = write_run(tmp_path, text)
+    assert "missm-2" in defects("fortran", run_dir, text, N_EVENTS)
+
+
+def test_the_port_is_never_flagged(tmp_path):
+    """The port has no 32-bit counters and writes the n-tuple itself, so none of
+    these checks may fire on it -- otherwise the gate would eat the good arm."""
+    run_dir = tmp_path / "port"
+    run_dir.mkdir()
+    (run_dir / "out.txt").write_text(
+        "sigma (MC)       : 0.00648899 micro-barn\n"
+        "throughput       : 70 events/s (7,092,083 trials/s)\n"
+    )
+    assert defects("py_gpu", run_dir, "", N_EVENTS) == []
+
+
+def test_defect_summary_counts_and_excludes_clean(tmp_path):
+    clean = write_run(tmp_path / "a", CLEAN)
+    bad = write_run(tmp_path / "b", OVERFLOWED, records=8800)
+    results = {
+        "fortran": {
+            "clean_run": {"defects": defects("fortran", clean, CLEAN, N_EVENTS)},
+            "bad_run": {"defects": defects("fortran", bad, OVERFLOWED, N_EVENTS)},
+        }
+    }
+    summary = defect_summary(results)
+    assert summary["fortran"]["counter_overflow"] == 1
+    assert summary["fortran"]["clean"] == 1
+
+
+def test_parse_sigma_reports_defects_through_to_the_caller(tmp_path):
+    """collect() reads defects off parse_sigma, so they have to travel together."""
+    run_dir = write_run(tmp_path, OVERFLOWED, records=8800)
+    info = parse_sigma("fortran", run_dir, N_EVENTS)
+    assert info["defects"], "defects must survive parse_sigma"
+    assert info["sigma"] is not None  # the whole problem: a sigma is still printed
