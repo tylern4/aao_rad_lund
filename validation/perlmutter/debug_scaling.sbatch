@@ -70,6 +70,15 @@ echo "nproc: $(nproc)   threads visible"
 echo "card: $CARD"
 EVENTS=${AAO_SCALING_EVENTS:-500}
 
+# Which card each worker runs.  "same" gives every worker an identical card, so
+# all 128 compile the same module; "distinct" hands out different cards, so they
+# compile different ones -- which is what a real arm does, and the only thing
+# about an arm that this probe had never reproduced.
+CARDMODE=${AAO_SCALING_CARDS:-same}
+CARDS=("$SCRATCH"/aao_rad_scan_smoke/grid/cfg_*.txt)
+NCARDS=${#CARDS[@]}
+echo "cards: $NCARDS available, handing out: $CARDMODE"
+
 NCPU=$(python3 -c 'import os; print(len(os.sched_getaffinity(0)))' 2>/dev/null || echo 1)
 
 # run_case <label> <n> <cache-dir|none> [pinned]
@@ -85,12 +94,16 @@ run_case() {
   fi
 
   echo
-  echo "== $label: $n concurrent processes, events $EVENTS, cache ${cachedir##*/}, affinity $pinned"
+  echo "== $label: $n concurrent processes, events $EVENTS, cache ${cachedir##*/}, affinity $pinned, cards $CARDMODE"
   local start=$SECONDS
   local pids=""
   for i in $(seq 1 "$n"); do
     mkdir -p "$d/runs/r$i"
-    cp "$CARD" "$d/runs/r$i/run_card.txt"
+    local src=$CARD
+    if [ "$CARDMODE" = "distinct" ] && [ "$NCARDS" -gt 0 ]; then
+      src=${CARDS[$(( (i - 1) % NCARDS ))]}
+    fi
+    cp "$src" "$d/runs/r$i/run_card.txt"
     # "pinned" reproduces what run_batch.py does to every port run: one logical
     # CPU each, round-robin over the affinity mask.
     local pre=()

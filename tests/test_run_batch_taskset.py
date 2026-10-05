@@ -553,3 +553,149 @@ def test_limit_zero_runs_everything(tmp_path, monkeypatch):
             for i in range(4)]
     assert run_batch.run_all(_warm_args(jobs=4), runs, tmp_path, tmp_path) == 0
     assert len(done) == 4
+
+
+# Every tasket test above calls taskset_prefix directly with a worker index of its
+# own choosing, so all of them pass with the dispatch path handing build_job a
+# constant.  That is not hypothetical: it is what run_all did, and it pinned all
+# 128 concurrent runs to one CPU.  These tests go through run_all instead, and
+# they hold the runs in flight simultaneously so that "distinct slice" is
+# asserted about concurrent runs rather than about a list.
+
+
+def _concurrency_args(code, jobs, gpus=0):
+    return argparse.Namespace(
+        code=code,
+        gpus=gpus,
+        jobs=jobs,
+        cpus_per_job=1,
+        dry_run=False,
+        python=sys.executable,
+        warmup_events=0,
+        limit=0,
+    )
+
+
+def _quiet_batch(monkeypatch, tmp_path):
+    """Strip run_all down to its dispatch, which is all these tests exercise."""
+    monkeypatch.setattr(run_batch, "stagger_seed", lambda *a, **k: 0.0)
+    monkeypatch.setattr(run_batch, "warmup_cache", lambda *a, **k: 0)
+    monkeypatch.setattr(run_batch, "run_complete", lambda code, run_dir: False)
+
+
+def test_concurrent_runs_never_share_a_core_slot(tmp_path, monkeypatch):
+    """A run's slice of the node arrives in build_job as `worker`.  With one
+    constant there, all 128 in-flight runs got `taskset -c <the same CPU>` and
+    time-sliced a single core -- which is what job 59339555 was: 30 minutes of
+    wall shared 128 ways is 14.1 CPU-seconds a run, it measured 13.6, the node
+    was 99% idle, and every thread was in futex_wait_queue."""
+    jobs = 8
+    taken: list[int] = []
+    lock = threading.Lock()
+    # Hold all `jobs` runs inside execute() at once, so the slots are provably
+    # concurrent rather than sequential.
+    all_in_flight = threading.Barrier(jobs, timeout=30)
+
+    def fake_build_job(run, code, root, repo, python, cpus_per_job, njobs, worker, gpus):
+        with lock:
+            taken.append(worker)
+        return ([run["run_id"]], {}, tmp_path, None)
+
+    monkeypatch.setattr(run_batch, "build_job", fake_build_job)
+    monkeypatch.setattr(run_batch, "execute", lambda job: (all_in_flight.wait(), ("x", 0, 0.0))[1])
+    _quiet_batch(monkeypatch, tmp_path)
+
+    runs = [{"run_id": f"cfg_{i:03d}_s0", "cfg_id": f"cfg_{i:03d}", "seed": "1"}
+            for i in range(jobs)]
+    assert run_batch.run_all(_concurrency_args("py_cpu", jobs), runs, tmp_path, tmp_path) == 0
+    assert sorted(taken) == list(range(jobs)), taken
+
+
+def test_gpu_runs_in_flight_land_on_distinct_devices(tmp_path, monkeypatch):
+    """The same constant sent every GPU run to cuda:0, so a four-A100 node ran
+    one device and idled three.  Assert on the environment build_job really
+    builds rather than on the index, since the device list is what the child
+    process sees."""
+    gpus = 4
+    devices: list[str] = []
+    lock = threading.Lock()
+    all_in_flight = threading.Barrier(gpus, timeout=30)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1,2,3")
+
+    def fake_execute(job):
+        _, env, _, _ = job
+        with lock:
+            devices.append(env["CUDA_VISIBLE_DEVICES"])
+        all_in_flight.wait()
+        return ("x", 0, 0.0)
+
+    monkeypatch.setattr(run_batch, "execute", fake_execute)
+    _quiet_batch(monkeypatch, tmp_path)
+
+    root = tmp_path / "scan"
+    repo = tmp_path / "repo"
+    (root / "grid").mkdir(parents=True)
+    (repo / "parms").mkdir(parents=True)
+    runs = []
+    for i in range(gpus):
+        (root / "grid" / f"cfg_{i:03d}.txt").write_text("card\n")
+        runs.append({"run_id": f"cfg_{i:03d}_s0", "cfg_id": f"cfg_{i:03d}",
+                     "seed": "1", "n_events": "20000"})
+
+    assert run_batch.run_all(
+        _concurrency_args("py_gpu", gpus, gpus=gpus), runs, root, repo
+    ) == 0
+    assert sorted(devices) == ["0", "1", "2", "3"], devices
+
+
+def test_a_finished_run_returns_its_slot(tmp_path, monkeypatch):
+    """Slots are recycled, so a 192-run arm over 128 workers does not exhaust
+    them once the first wave drains -- and every slot stays in range, so two
+    runs in flight can still never land on one slice."""
+    jobs = 2
+    taken: list[int] = []
+    lock = threading.Lock()
+
+    def fake_build_job(run, code, root, repo, python, cpus_per_job, njobs, worker, gpus):
+        with lock:
+            taken.append(worker)
+        return ([run["run_id"]], {}, tmp_path, None)
+
+    monkeypatch.setattr(run_batch, "build_job", fake_build_job)
+    monkeypatch.setattr(run_batch, "execute", lambda job: (time.sleep(0.01), ("x", 0, 0.0))[1])
+    _quiet_batch(monkeypatch, tmp_path)
+
+    runs = [{"run_id": f"cfg_{i:03d}_s0", "cfg_id": f"cfg_{i:03d}", "seed": "1"}
+            for i in range(6)]
+    assert run_batch.run_all(_concurrency_args("py_cpu", jobs), runs, tmp_path, tmp_path) == 0
+    assert len(taken) == 6
+    assert set(taken) <= {0, 1}, taken
+
+
+def test_a_run_that_raises_still_returns_its_slot(tmp_path, monkeypatch):
+    """The slot is released in a finally, so one failing run cannot shrink the
+    pool for every run after it."""
+    jobs = 2
+    taken: list[int] = []
+    lock = threading.Lock()
+
+    def fake_build_job(run, code, root, repo, python, cpus_per_job, njobs, worker, gpus):
+        with lock:
+            taken.append(worker)
+        return ([run["run_id"]], {}, tmp_path, None)
+
+    def fake_execute(job):
+        if job[0][0].endswith("_s0") and job[0][0] < "cfg_002_s0":
+            raise OSError("node went away")
+        return ("x", 0, 0.0)
+
+    monkeypatch.setattr(run_batch, "build_job", fake_build_job)
+    monkeypatch.setattr(run_batch, "execute", fake_execute)
+    _quiet_batch(monkeypatch, tmp_path)
+
+    runs = [{"run_id": f"cfg_{i:03d}_s0", "cfg_id": f"cfg_{i:03d}", "seed": "1"}
+            for i in range(6)]
+    with pytest.raises(OSError):
+        run_batch.run_all(_concurrency_args("py_cpu", jobs), runs, tmp_path, tmp_path)
+    assert len(taken) >= 2
+    assert set(taken) <= {0, 1}, taken

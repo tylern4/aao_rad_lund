@@ -426,14 +426,44 @@ def run_all(args, runs: list[dict], root: Path, repo: Path) -> int:
     failures: list[str] = []
     t0 = time.time()
 
+    # build_job reads a run's slice of the node out of `worker`: which core
+    # taskset pins it to, and which GPU it is handed.  Passing a constant there
+    # gave every concurrent run the same slice -- `taskset -c <one CPU>` and
+    # `CUDA_VISIBLE_DEVICES=<device 0>` -- so 128 processes time-sliced a single
+    # core and three of the four GPUs sat idle.  That is what job 59339555 was:
+    # 30 minutes of wall shared 128 ways is 14.1 CPU-seconds per run, it measured
+    # 13.6, the node was 99% idle, and every thread sat in futex_wait_queue.
+    #
+    # Slots come off a free list rather than a counter, so "no two runs in flight
+    # share a slice" holds by construction.  A counter would nearly do it -- the
+    # mapping round-robins -- but a slow run holding index 5 would collide with
+    # index 133 once the other workers had churned that far, and the whole point
+    # is that this failure is invisible until it is very expensive.
+    slots = list(range(workers))
+    slots_lock = threading.Lock()
+
     def launch(run: dict) -> tuple[str, int, float]:
         # Before build_job, so the wait is not charged to the run's own timing.
         stagger_seed(args.code, run["cfg_id"])
-        return execute(
-            build_job(
-                run, args.code, root, repo, args.python, args.cpus_per_job, workers, 0, gpus
+        with slots_lock:
+            worker = slots.pop()
+        try:
+            return execute(
+                build_job(
+                    run,
+                    args.code,
+                    root,
+                    repo,
+                    args.python,
+                    args.cpus_per_job,
+                    workers,
+                    worker,
+                    gpus,
+                )
             )
-        )
+        finally:
+            with slots_lock:
+                slots.append(worker)
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(launch, run): run["run_id"] for run in pending}
