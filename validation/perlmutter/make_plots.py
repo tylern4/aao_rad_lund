@@ -62,12 +62,21 @@ STYLE = {
 
 
 def load_events(code: str, run_dir: Path, observables: list[str]) -> dict[str, np.ndarray]:
-    """Observable columns for one run, quantized to the reference's precision."""
-    if code == "fortran":
-        raw = load_fortran_ntuple(run_dir / "aao_rad.ntuple")
-    else:
-        with np.load(run_dir / "out.npz") as data:
-            raw = {name: np.asarray(data[name]) for name in observables if name in data}
+    """Observable columns for one run, quantized to the reference's precision.
+
+    Returns an empty mapping when the file is absent or unreadable.  A run counts
+    as complete from its ``out.txt`` alone, so an arm can be 'complete' with a
+    missing or half-written npz; that should cost that arm's curves, not kill
+    the whole figure.
+    """
+    try:
+        if code == "fortran":
+            raw = load_fortran_ntuple(run_dir / "aao_rad.ntuple")
+        else:
+            with np.load(run_dir / "out.npz") as data:
+                raw = {name: np.asarray(data[name]) for name in observables if name in data}
+    except (OSError, ValueError, EOFError):
+        return {}
     return {name: quantize_sig(raw[name]) for name in observables if name in raw}
 
 
@@ -324,15 +333,19 @@ def main() -> int:
     results = collect(root)
     by_cfg = pairs_by_config(results)
 
-    # Configurations where every arm has both seeds and a clean reference.
+    # A configuration is plottable when the *reference* is sound -- both seeds
+    # clean -- and at least one port arm has both seeds to compare against.
+    # Requiring every arm would throw away configurations that are perfectly
+    # plottable Fortran-vs-GPU just because an unrelated arm is still running,
+    # which is the normal state of a scan in progress.
     valid = [
         cfg
         for cfg in sorted(by_cfg["fortran"])
         if len(by_cfg["fortran"][cfg]) >= 2
-        and all(len(by_cfg[c].get(cfg, [])) >= 2 for c in ("py_cpu", "py_gpu"))
+        and any(len(by_cfg[c].get(cfg, [])) >= 2 for c in ("py_cpu", "py_gpu"))
     ]
     if not valid:
-        print("no configuration has a clean two-seed reference in every arm", file=sys.stderr)
+        print("no configuration has a clean two-seed reference to plot against", file=sys.stderr)
         return 1
 
     if args.all_valid:
@@ -361,29 +374,39 @@ def main() -> int:
         + f"); plotting {len(chosen)}"
     )
     for cfg in sorted({r["cfg_id"] for r in results["fortran"].values()}):
-        if cfg not in valid:
-            why = sorted(
-                {d for r in results["fortran"].values() if r["cfg_id"] == cfg
-                 for d in (r.get("defects") or ("no output",))}
-            )
-            print(f"  skipped {cfg}: {', '.join(why)}")
+        if cfg in valid:
+            continue
+        defects = sorted(
+            {
+                d
+                for r in results["fortran"].values()
+                if r["cfg_id"] == cfg
+                for d in (r.get("defects") or ("reference unusable",))
+            }
+        )
+        short = [c for c in ("py_cpu", "py_gpu") if len(by_cfg[c].get(cfg, [])) < 2]
+        parts = [f"fortran {', '.join(defects)}"] if defects else ["fortran not usable"]
+        if short:
+            parts.append(f"{'/'.join(short)} incomplete")
+        print(f"  skipped {cfg}: {'; '.join(parts)}")
 
     made: list[Path] = []
     for i, cfg in enumerate(chosen, 1):
-        events = {
-            code: load_events(code, by_cfg[code][cfg][0]["path"], [o[1] for o in observables])
-            for code in CODES
-        }
-        # Pool both seeds so each histogram has the full event count.
-        for code in CODES:
-            second = load_events(code, by_cfg[code][cfg][1]["path"], [o[1] for o in observables])
-            for name, v in second.items():
-                if name in events[code]:
-                    events[code][name] = np.concatenate([events[code][name], v])
+        arms = [c for c in CODES if len(by_cfg[c].get(cfg, [])) >= 2]
+        events: dict[str, dict[str, np.ndarray]] = {}
+        for code in arms:
+            # Pool both seeds so each histogram has the full event count.
+            pooled: dict[str, list[np.ndarray]] = {}
+            for run in by_cfg[code][cfg][:2]:
+                for name, v in load_events(
+                    code, run["path"], [o[1] for o in observables]
+                ).items():
+                    pooled.setdefault(name, []).append(v)
+            events[code] = {k: np.concatenate(v) for k, v in pooled.items()}
         path = plot_config(cfg, events, observables, out_dir, args.floor_c)
         if path:
             made.append(path)
-            print(f"  [{i}/{len(chosen)}] {path.name}")
+            print(f"  [{i}/{len(chosen)}] {path.name}  arms={','.join(arms)}")
 
     cross_rows = _cross_rows(results, by_cfg)
     made.append(plot_sigma_by_energy(cross_rows, ebeam_by_cfg, out_dir))

@@ -170,15 +170,47 @@ def test_figures_are_not_blank(scan):
         assert len(data) > 5_000, f"{png.name} looks blank ({len(data)} bytes)"
 
 
+def test_an_incomplete_arm_does_not_block_a_plottable_pair(scan):
+    """A configuration with a clean reference and a complete GPU arm is perfectly
+    plottable Fortran-vs-GPU.  Requiring all three arms throws it away just
+    because CPU is still running, which is the normal state of a scan."""
+    # Model "still running": the run has not printed a cross section yet.
+    for s in (11, 22):
+        (scan / "py_cpu" / f"cfg_001_s{s}" / "out.txt").write_text("2000/20000 events\n")
+    r = run(scan)
+    assert r.returncode == 0, r.stderr
+    assert (scan / "plots" / "cfg_001.png").exists()
+    assert "arms=fortran,py_gpu" in r.stdout, r.stdout
+
+
+def test_a_missing_npz_costs_that_arm_not_the_figure(scan):
+    """A run counts as complete from its out.txt, so an arm can be 'complete'
+    with a missing or half-written npz.  That must cost the arm's curves, not
+    raise FileNotFoundError and kill every figure."""
+    (scan / "py_gpu" / "cfg_000_s11" / "out.npz").unlink()
+    r = run(scan)
+    assert r.returncode == 0, r.stderr
+    assert (scan / "plots" / "cfg_000.png").exists()
+    assert (scan / "plots" / "cfg_001.png").exists()
+
+
+def test_a_corrupt_npz_is_survivable(scan):
+    (scan / "py_gpu" / "cfg_000_s11" / "out.npz").write_bytes(b"\x93NUMPY garbage")
+    r = run(scan)
+    assert r.returncode == 0, r.stderr
+    assert (scan / "plots" / "cfg_001.png").exists()
+
+
 def test_a_broken_reference_is_never_plotted(scan, capsys):
     """cfg_002's Fortran overflowed its counters.  Plotting the port against it
     would produce a confident picture of a disagreement that is an artifact."""
     r = run(scan)
     assert r.returncode == 0, r.stderr
     assert not (scan / "plots" / "cfg_002.png").exists()
-    # It must be named as skipped, and the count must be against the grid rather
-    # than against the filtered set -- "2 of 2" would hide the drop.
+    # It must be named as skipped with its reason, and the count must be against
+    # the grid rather than the filtered set -- "2 of 2" would hide the drop.
     assert "skipped cfg_002" in r.stdout, r.stdout
+    assert "counter_overflow" in r.stdout, r.stdout
     assert "2 of 3 in the grid" in r.stdout, r.stdout
 
 
