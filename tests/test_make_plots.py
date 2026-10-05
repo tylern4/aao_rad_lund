@@ -276,6 +276,53 @@ def test_every_energy_level_gets_a_row_in_the_energy_plot(scan):
     assert "12.0" not in r.stdout.split("plotting")[-1]
 
 
+def test_the_figure_is_readable_rather_than_a_4400_pixel_column(scan):
+    """All sixteen observables in one column produced a figure that is
+    technically a plot and practically unscannable."""
+    import matplotlib.image as mpimg
+
+    r = run(scan)  # --observables es,ep,q2,mm2, --bins 30
+    assert r.returncode == 0, r.stderr
+    img = mpimg.imread(scan / "plots" / "cfg_000.png")
+    height, width = img.shape[0], img.shape[1]
+    assert height < width * 3, f"figure is {width}x{height}: too tall to read"
+
+
+def test_per_row_changes_the_layout(scan):
+    import matplotlib.image as mpimg
+
+    r = run(scan, "--per-row", "1")
+    assert r.returncode == 0, r.stderr
+    tall = mpimg.imread(scan / "plots" / "cfg_000.png").shape[0]
+    r = run(scan, "--per-row", "4")
+    assert r.returncode == 0, r.stderr
+    wide = mpimg.imread(scan / "plots" / "cfg_000.png").shape[0]
+    assert wide < tall, f"per-row=4 gave {wide}px, per-row=1 gave {tall}px"
+
+
+def test_a_leftover_partial_block_row_is_blanked(scan):
+    """Four observables at two per row fills the grid exactly; three leaves a
+    half-built cell that would otherwise render as empty axes."""
+    r = subprocess.run(
+        [sys.executable, str(PERLMUTTER / "make_plots.py"),
+         "--root", str(scan), "--out-dir", str(scan / "plots"),
+         "--observables", "es,ep,q2", "--per-row", "2"],
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    assert (scan / "plots" / "cfg_000.png").stat().st_size > 5_000
+
+
+def test_the_bins_flag_reaches_the_histogram(scan):
+    """--bins was parsed but never passed to bin_edges, so it changed nothing."""
+    import make_plots
+
+    a = np.linspace(0.0, 1.0, 500)
+    b = np.linspace(0.0, 1.0, 500) + 0.01
+    assert len(np.histogram(a, bins=make_plots.bin_edges(a, b, 10))[1]) == 11
+    assert len(np.histogram(a, bins=make_plots.bin_edges(a, b, 40))[1]) == 41
+
+
 def test_the_difference_panel_uses_the_reference_label(scan):
     """If the fortran arm is absent the y-label must not still say 'Fortran'."""
     import make_plots

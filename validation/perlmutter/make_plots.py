@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import argparse
 import csv
-import os
+import math
 import sys
 from pathlib import Path
 
@@ -119,99 +119,127 @@ def plot_config(
     observables: list[tuple],
     out_dir: Path,
     ks_floor_c: float,
+    per_row: int = 2,
+    dpi: int = 110,
+    bins: int = 60,
 ) -> Path | None:
-    """Overlay grid for one configuration: histogram on top, difference below."""
+    """Overlay grid for one configuration: histogram on top, difference below.
+
+    ``per_row`` observables are placed side by side.  Stacking all sixteen in one
+    column produced a 4400-pixel-tall figure, which is technically a plot and
+    practically unreadable.
+    """
     codes = [c for c in CODES if c in events]
-    n_obs = len(observables)
+    per_row = max(1, per_row)
+    n_cols = per_row * 2  # histogram | verdict, and difference | spare
+    n_rows = 2 * math.ceil(len(observables) / per_row)
     fig, axes = plt.subplots(
-        2 * n_obs, 2, figsize=(11.0, 2.5 * n_obs), squeeze=False,
-        gridspec_kw={"height_ratios": [3, 1.15] * n_obs},
+        n_rows,
+        n_cols,
+        figsize=(5.5 * n_cols / 2, 2.6 * n_rows),
+        squeeze=False,
+        gridspec_kw={"height_ratios": [3, 1.15] * (n_rows // 2)},
     )
 
     for i, (title, name, lo, hi, logscale) in enumerate(observables):
+        r = 2 * (i // per_row)
+        c = 2 * (i % per_row)
         samples = {}
         for code in codes:
             v = events[code].get(name)
             if v is not None and v.size:
                 samples[code] = np.asarray(v, float)
         if len(samples) < 2:
-            for ax in axes[2 * i] :
-                ax.axis("off")
-            for ax in axes[2 * i + 1]:
-                ax.axis("off")
+            for rr in (r, r + 1):
+                for cc in (c, c + 1):
+                    axes[rr][cc].axis("off")
             continue
 
         ref = codes[0]
-        edges = bin_edges(samples[ref], samples[codes[-1]])
-        centres, fa, diff, err = two_sample_bins(
-            samples[ref], samples[codes[-1]], edges
-        )
+        edges = bin_edges(samples[ref], samples[codes[-1]], bins)
+        centres, fa, diff, err = two_sample_bins(samples[ref], samples[codes[-1]], edges)
 
-        # ---- top: the two distributions on top of each other
-        ax = axes[2 * i][0]
+        # ---- the distributions on top of each other
+        ax = axes[r][c]
         for code, sample in samples.items():
             st = STYLE[code]
             counts, _ = np.histogram(sample, bins=edges)
             ax.step(
-                centres, counts / counts.sum() / np.diff(edges),
-                where="mid", color=st["color"], linestyle=st["linestyle"],
-                linewidth=1.6, label=f"{st['label']} (n={sample.size})",
+                centres,
+                counts / counts.sum() / np.diff(edges),
+                where="mid",
+                color=st["color"],
+                linestyle=st["linestyle"],
+                linewidth=1.6,
+                label=f"{st['label']} (n={sample.size})",
             )
         if logscale:
             ax.set_yscale("log")
         ax.set_ylabel("density")
-        ax.legend(fontsize=8, frameon=False, loc="upper right")
+        ax.legend(fontsize=7, frameon=False, loc="upper right")
 
-        # ---- top right: the statistic, so the plot states its own verdict
-        axk = axes[2 * i][1]
+        # ---- the statistic, so each panel states its own verdict
+        axk = axes[r][c + 1]
         axk.axis("off")
-        worst = ""
+        axk.set_title(title, fontsize=10)
+        y = 0.95
         for code in codes[1:]:
-            stat, pval = ks_test(samples[ref], samples[code])
+            stat, _ = ks_test(samples[ref], samples[code])
             n_a, n_b = samples[ref].size, samples[code].size
             floor = ks_floor_c * np.sqrt(1.0 / n_a + 1.0 / n_b)
             verdict = "within floor" if stat <= floor else "OVER FLOOR"
-            lines = [
-                f"{STYLE[code]['label']} vs {STYLE[ref]['label']}",
-                f"  KS      {stat:.4f}",
-                f"  floor   {floor:.4f}",
-                f"  {verdict}",
-                f"  N       {n_a} / {n_b}",
-            ]
-            axk.text(
-                0.02, 0.92 if not worst else 0.46, "\n".join(lines),
-                family="monospace", fontsize=9, va="top",
-                bbox=dict(boxstyle="round,pad=0.5", facecolor="#f4f4f4", edgecolor="#999"),
+            block = "\n".join(
+                [
+                    f"{STYLE[code]['label']} vs {STYLE[ref]['label']}",
+                    f"  KS    {stat:.4f}",
+                    f"  floor {floor:.4f}",
+                    f"  {verdict}",
+                ]
             )
-            worst = "set"
-        axk.set_title(title, fontsize=10)
+            axk.text(
+                0.02, y, block, family="monospace", fontsize=8, va="top",
+                bbox=dict(boxstyle="round,pad=0.4", facecolor="#f4f4f4", edgecolor="#999"),
+            )
+            y -= 0.42
 
-        # ---- bottom: where they differ, with the two-sample band
-        axd = axes[2 * i + 1][0]
+        # ---- where they differ, with the two-sample band
+        axd = axes[r + 1][c]
         axd.bar(centres, diff, width=np.diff(edges), color="#444", alpha=0.75)
         axd.fill_between(
             centres, -err, err, color="#888", alpha=0.4, linewidth=0,
-            label=r"$\pm1\sigma$ (two-sample)",
         )
         axd.axhline(0.0, color="k", linewidth=0.8)
-        axd.set_yscale("symlog", linthresh=max(float(np.max(np.abs(diff))) * 0.02, 1e-6))
+        axd.set_yscale(
+            "symlog", linthresh=max(float(np.max(np.abs(diff))) * 0.02, 1e-6)
+        )
         axd.set_ylabel(f"{STYLE[codes[-1]]['label']} - {STYLE[ref]['label']}")
         axd.set_xlabel(name)
-        axes[2 * i + 1][1].axis("off")
+        axes[r + 1][c + 1].axis("off")
+
+    # Blank off any unused cells in the last block row.  The grid holds
+    # per_row * n_block_rows cells, not per_row * n_rows: each block is two rows.
+    for i in range(len(observables), per_row * (n_rows // 2)):
+        r = 2 * (i // per_row)
+        c = 2 * (i % per_row)
+        for rr in (r, r + 1):
+            for cc in (c, c + 1):
+                axes[rr][cc].axis("off")
 
     fig.suptitle(
         f"{cfg_id}: Fortran vs JAX event distributions "
-        f"(2 seeds pooled per arm, quantized to 8 significant digits)",
+        f"(both seeds pooled per arm; quantized to 8 significant digits)",
         fontsize=12,
     )
     fig.tight_layout(rect=(0, 0, 1, 0.985))
     path = out_dir / f"{cfg_id}.png"
-    fig.savefig(path, dpi=110)
+    fig.savefig(path, dpi=dpi)
     plt.close(fig)
     return path
 
 
-def plot_sigma_by_energy(cross_rows: list[dict], ebeam_by_cfg: dict, out_dir: Path) -> Path:
+def plot_sigma_by_energy(
+    cross_rows: list[dict], ebeam_by_cfg: dict, out_dir: Path, dpi: int = 110
+) -> Path:
     """Cross-section difference per beam energy, against the same-code noise."""
     pairs = sorted({r["pair"] for r in cross_rows})
     fig, ax = plt.subplots(figsize=(8.2, 5.0))
@@ -253,13 +281,13 @@ def plot_sigma_by_energy(cross_rows: list[dict], ebeam_by_cfg: dict, out_dir: Pa
     ax.grid(alpha=0.25)
     fig.tight_layout()
     path = out_dir / "sigma_by_energy.png"
-    fig.savefig(path, dpi=110)
+    fig.savefig(path, dpi=dpi)
     plt.close(fig)
     return path
 
 
 def plot_sigma_by_config(
-    cross_rows: list[dict], ebeam_by_cfg: dict, out_dir: Path
+    cross_rows: list[dict], ebeam_by_cfg: dict, out_dir: Path, dpi: int = 110
 ) -> Path:
     """Every configuration's ratio, coloured by beam energy, so outliers are visible."""
     pairs = sorted({r["pair"] for r in cross_rows})
@@ -296,7 +324,7 @@ def plot_sigma_by_config(
     )
     fig.tight_layout(rect=(0, 0, 1, 0.94))
     path = out_dir / "sigma_by_config.png"
-    fig.savefig(path, dpi=110)
+    fig.savefig(path, dpi=dpi)
     plt.close(fig)
     return path
 
@@ -307,7 +335,12 @@ def main() -> int:
     p.add_argument("--out-dir", type=Path, default=None)
     p.add_argument("--observables", default="", help="comma-separated subset of observable columns")
     p.add_argument("--per-energy", type=int, default=2, help="configurations to plot per beam energy")
-    p.add_argument("--bins", type=int, default=60)
+    p.add_argument("--bins", type=int, default=60, help="bins per observable histogram")
+    p.add_argument(
+        "--per-row", type=int, default=2,
+        help="observables placed side by side; 1 gives a single tall column",
+    )
+    p.add_argument("--dpi", type=int, default=110)
     p.add_argument("--floor-c", type=float, default=1.36)
     p.add_argument("--all-valid", action="store_true", help="plot every valid configuration")
     args = p.parse_args()
@@ -403,14 +436,17 @@ def main() -> int:
                 ).items():
                     pooled.setdefault(name, []).append(v)
             events[code] = {k: np.concatenate(v) for k, v in pooled.items()}
-        path = plot_config(cfg, events, observables, out_dir, args.floor_c)
+        path = plot_config(
+            cfg, events, observables, out_dir, args.floor_c,
+            per_row=args.per_row, dpi=args.dpi, bins=args.bins,
+        )
         if path:
             made.append(path)
             print(f"  [{i}/{len(chosen)}] {path.name}  arms={','.join(arms)}")
 
     cross_rows = _cross_rows(results, by_cfg)
-    made.append(plot_sigma_by_energy(cross_rows, ebeam_by_cfg, out_dir))
-    made.append(plot_sigma_by_config(cross_rows, ebeam_by_cfg, out_dir))
+    made.append(plot_sigma_by_energy(cross_rows, ebeam_by_cfg, out_dir, args.dpi))
+    made.append(plot_sigma_by_config(cross_rows, ebeam_by_cfg, out_dir, args.dpi))
     print(f"wrote {len(made)} figures to {out_dir}")
     return 0
 
