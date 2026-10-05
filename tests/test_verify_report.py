@@ -190,6 +190,32 @@ def test_a_fully_clean_tree_excludes_nothing(tmp_path, capsys):
     assert "2 configurations with both runs" in out
 
 
+def test_a_run_full_of_missm_warnings_is_still_compared(tmp_path, capsys):
+    """The regression that cost the whole comparison.
+
+    167 of the 192 real Fortran runs print 'missm-2' hundreds of times and are
+    otherwise healthy -- full n-tuple, positive cross section.  It is a per-event
+    clamp, not a failure.  With it counted as a defect the reference arm reported
+    1 of 96 configurations usable.
+    """
+    root = tmp_path / "noisy"
+    build_tree(root)
+    for s in (11, 22):
+        d = root / "fortran" / f"cfg_001_s{s}"
+        healthy = (d / "out.txt").read_text()
+        (d / "out.txt").write_text(healthy + "  missm-2: snthcm =   0.00000000\n" * 500)
+        write_ntuple(d / "aao_rad.ntuple", sample_events(np.random.default_rng(1), N_EVENTS))
+
+    rc, out = run_main(root, capsys)
+    assert rc == 0, out
+    # cfg_000 is still genuinely broken, cfg_001 is not.
+    line = next(l for l in out.splitlines() if l.strip().startswith("fortran:"))
+    assert "4/4 runs complete" in line, line
+    assert "2 usable after defect checks" in line, line
+    assert next(l for l in out.splitlines() if "fortran vs py_gpu" in l).count("1 cfgs")
+    assert "'missm-2' in these logs is NOT a defect" in out
+
+
 def test_observables_are_all_present_in_the_synthetic_ntuple():
     """Guards the fixture: if a column goes missing the KS rows silently shrink."""
     events = sample_events(np.random.default_rng(0), 8)

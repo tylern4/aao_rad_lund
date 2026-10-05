@@ -106,10 +106,40 @@ def test_short_ntuple_is_caught(tmp_path):
     assert any("9577" in d for d in found), found
 
 
-def test_missm_is_caught(tmp_path):
-    text = CLEAN + "  missm-2: snthcm =   0.00000000\n"
+def test_missm_is_not_a_defect(tmp_path):
+    """``missm-2`` must NOT exclude a run.
+
+    It is a per-event clamp inside the generation loop (src/aao_rad.f90:1666-1668):
+    when ``csthcm**2`` rounds just past 1 it prints the warning, sets snthcm to
+    1e-7 and continues with the next event.  167 of the 192 real runs hit it,
+    including runs with a full 20,000-record n-tuple and a healthy positive cross
+    section.  Treating it as a defect discarded 167 good runs and left exactly one
+    usable configuration out of 96.
+    """
+    text = CLEAN + "  missm-2: snthcm =   0.00000000\n" * 500
     run_dir = write_run(tmp_path, text)
-    assert "missm-2" in defects("fortran", run_dir, text, N_EVENTS)
+    assert defects("fortran", run_dir, text, N_EVENTS) == []
+    info = parse_sigma("fortran", run_dir, N_EVENTS)
+    assert info["sigma"] > 0.0
+    assert info["defects"] == []
+
+
+def test_missm_does_not_mask_a_real_defect(tmp_path):
+    """It must not shield a run that genuinely overflowed."""
+    text = OVERFLOWED + "  missm-2: snthcm =   0.00000000\n" * 500
+    run_dir = write_run(tmp_path, text, records=8800)
+    found = defects("fortran", run_dir, text, N_EVENTS)
+    assert "counter_overflow" in found
+    assert "missm-2" not in found
+
+
+def test_a_non_positive_sigma_is_flagged_on_its_own_merits(tmp_path):
+    """No counter overflow, but a cross section of zero is still unusable -- the
+    sign check must not be gated on some other defect being present."""
+    text = CLEAN.replace("6.58196583E-03", "0.00000000E+00")
+    run_dir = write_run(tmp_path, text)
+    found = defects("fortran", run_dir, text, N_EVENTS)
+    assert found == ["non_positive_sigma"], found
 
 
 def test_the_port_is_never_flagged(tmp_path):
@@ -136,6 +166,30 @@ def test_defect_summary_counts_and_excludes_clean(tmp_path):
     summary = defect_summary(results)
     assert summary["fortran"]["counter_overflow"] == 1
     assert summary["fortran"]["clean"] == 1
+
+
+def test_defect_summary_buckets_the_short_ntuple_detail(tmp_path):
+    """Each short run must not get its own report line: the counts are per defect
+    kind, with the exact record counts kept in the per-run detail."""
+    runs = {}
+    for i, n in enumerate((19032, 18084, 9582)):
+        d = write_run(tmp_path / f"s{i}", CLEAN, records=n)
+        runs[f"run{i}"] = {"defects": defects("fortran", d, CLEAN, N_EVENTS)}
+    summary = defect_summary({"fortran": runs})
+    assert summary["fortran"] == {"short_ntuple": 3}
+    # The detail is still recoverable per run.
+    assert "9582" in runs["run2"]["defects"][0]
+
+
+def test_defect_counts_can_exceed_the_excluded_run_count(tmp_path):
+    """A run may carry several defects, so the per-defect total can exceed the
+    number of runs dropped.  The report prints both numbers, so make sure the
+    distinction is real rather than a coincidence of the fixture."""
+    d = write_run(tmp_path, OVERFLOWED, records=8800)
+    results = {"fortran": {"run0": {"defects": defects("fortran", d, OVERFLOWED, N_EVENTS)}}}
+    summary = defect_summary(results)
+    n_runs = sum(1 for r in results["fortran"].values() if r["defects"])
+    assert sum(v for k, v in summary["fortran"].items() if k != "clean") > n_runs
 
 
 def test_parse_sigma_reports_defects_through_to_the_caller(tmp_path):

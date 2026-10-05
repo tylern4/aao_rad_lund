@@ -101,6 +101,8 @@ PORT_TRIALS_RE = re.compile(r"\(([\d,]+) trials/s\)")
 # patterns for a wrapped value; the unsigned ones above cannot match one.
 FORT_NTRIES_NEG_RE = re.compile(r"ntries, nevent, mcall_max:\s*-\d+")
 FORT_NGEOM_NEG_RE = re.compile(r"ntries, ngeom\s*=\s*-\d+")
+# Deliberately unused as a defect signal; kept only so that the report can say how
+# often it appeared.  See defects() -- it is a per-event clamp, not a failure.
 FORT_MISSM_RE = re.compile(r"missm-2")
 
 # The Fortran writes with '(50(1x,es16.8))' (src/aao_rad.f90:1082) over 47
@@ -122,20 +124,28 @@ def defects(code: str, run_dir: Path, text: str, n_events: int) -> list[str]:
     """Reasons this run cannot be used as a reference, most serious first.
 
     The port is fine on every count here; the checks exist because the *Fortran*
-    fails on about a quarter of this grid, silently, while still printing a
-    plausible-looking cross section.  Two independent causes:
+    fails on a quarter of this grid, silently, while still printing a
+    plausible-looking cross section.
 
-    ``integer*4 ntries`` wraps past 2**31 once a configuration needs more than
-    ~2.1e9 trials, and since that counter is a divisor the printed cross section
-    goes *negative* rather than merely becoming imprecise.  Meanwhile the
-    ``missm-2`` guard (snthcm = 1 - csthcm**2 going negative to rounding) marks
-    runs whose hadronic amplitude evaluated to zero, and those runs also tend to
-    stop short of their event quota.
+    ``integer*4 ntries`` and ``integer*4 ngeom`` (src/aao_rad.f90:154,158) wrap
+    past 2**31 once a configuration needs more than ~2.1e9 trials.  Because
+    ``ntries`` is a divisor in the cross section, the printed value goes
+    *negative* rather than merely becoming imprecise -- a sign that cannot be
+    mistaken for a small-but-positive result.  Runs that trip this also tend to
+    stop short of their event quota, so a short n-tuple is checked separately.
 
     Averaging these in silently is worse than dropping them: they produced a
-    reported fortran-vs-py_gpu sigma ratio spanning -10.4 to +5.4 and a
-    |z| of 24.8, which reads as a catastrophic port failure and is entirely an
-    artifact of the reference.
+    reported fortran-vs-py_gpu sigma ratio spanning -10.4 to +5.4 and a |z| of
+    24.8, which reads as a catastrophic port failure and is entirely an artifact
+    of the reference.
+
+    ``missm-2`` is deliberately *not* a defect.  It looks like one -- it is a
+    numerical guard printing a warning to stdout -- but it is per-event, inside
+    the generation loop (src/aao_rad.f90:1666-1668): whenever ``csthcm**2``
+    rounds just past 1 it clamps ``snthcm`` to 1e-7 and carries on with the next
+    event.  167 of the 192 runs here hit it, including runs with a full
+    20,000-record n-tuple and a healthy positive cross section.  Treating it as a
+    defect discarded 167 good runs and left a single usable configuration.
     """
     out: list[str] = []
     if code != "fortran":
@@ -143,10 +153,11 @@ def defects(code: str, run_dir: Path, text: str, n_events: int) -> list[str]:
 
     if FORT_NTRIES_NEG_RE.search(text) or FORT_NGEOM_NEG_RE.search(text):
         out.append("counter_overflow")
-    if out[0:] and float(_last_sigma(text) or 0.0) <= 0.0:
+    # Unconditional: a run that generated its full event quota must report a
+    # positive cross section, so a non-positive value is unusable whatever the
+    # cause, and the counter overflow above is the usual explanation.
+    if float(_last_sigma(text) or 0.0) <= 0.0:
         out.append("non_positive_sigma")
-    if FORT_MISSM_RE.search(text):
-        out.append("missm-2")
 
     ntp = run_dir / "aao_rad.ntuple"
     if ntp.is_file():
@@ -257,13 +268,20 @@ def pairs_by_config(results: dict[str, dict]) -> dict[str, dict[str, list[dict]]
 
 
 def defect_summary(results: dict[str, dict]) -> dict[str, dict[str, int]]:
-    """{code: {defect: n_runs}} over every collected run, for the report."""
+    """{code: {defect: n_runs}} over every collected run, for the report.
+
+    The count of runs carrying a defect can exceed the number of runs excluded,
+    because a run may carry more than one.  Parameterised defects such as
+    ``short_ntuple(19032<20000)`` are bucketed by name here -- otherwise every
+    short run gets its own line and the report is dominated by near-duplicates.
+    """
     counts: dict[str, dict[str, int]] = {}
     for code, runs in results.items():
         per: dict[str, int] = {}
         for run in runs.values():
             for d in run.get("defects") or ("clean",):
-                per[d] = per.get(d, 0) + 1
+                key = d.split("(")[0]
+                per[key] = per.get(key, 0) + 1
         counts[code] = dict(sorted(per.items(), key=lambda kv: -kv[1]))
     return counts
 
@@ -365,6 +383,10 @@ def main(argv: list[str] | None = None) -> int:
             "  than 2**31 trials wraps the counter that its cross section divides by and\n"
             "  reports a negative cross section.  Those runs are dropped, not averaged:\n"
             "  including them reported a sigma ratio of -10.4 to +5.4 against the port."
+        )
+        print(
+            "  'missm-2' in these logs is NOT a defect and is not excluded: it is a\n"
+            "  per-event clamp when csthcm**2 rounds past 1, and most runs hit it."
         )
 
     # ---- like-for-like: run-to-run scatter and KS within each code
