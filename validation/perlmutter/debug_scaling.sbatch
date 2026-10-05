@@ -31,7 +31,10 @@
 # shared with the compute nodes and $HOME is 74% full).
 
 #SBATCH --constraint=cpu
-#SBATCH --time=00:40:00
+# The debug QoS refuses anything longer (QOSMaxWallDurationPerJobLimit), so this
+# is 30 minutes, and the per-case cap below is set so the five cases fit inside
+# it even if every one of them hangs to the cap.
+#SBATCH --time=00:30:00
 
 set -uo pipefail
 
@@ -86,7 +89,7 @@ run_case() {
   for i in $(seq 1 "$n"); do
     mkdir -p "$d/runs/r$i"
     cp "$CARD" "$d/runs/r$i/run_card.txt"
-    ( cd "$d/runs/r$i" && exec timeout "${CASE_CAP:-300}" "$PY" -m aao_rad.cli \
+    ( cd "$d/runs/r$i" && exec timeout "${CASE_CAP:-180}" "$PY" -m aao_rad.cli \
         --legacy-input run_card.txt --parms "$REPO/parms" \
         --n-events "$EVENTS" --seed $((8675309 + i)) \
         --ek-sampling fortran --format npz \
