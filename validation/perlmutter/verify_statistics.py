@@ -373,10 +373,15 @@ def main(argv: list[str] | None = None) -> int:
     # Manifest totals per arm, for a denominator that does not move when runs are
     # excluded.  collect() re-reads the manifest; this is the same file, counted.
     n_expected: dict[str, int] = {}
+    ebeam_by_cfg: dict[str, str] = {}
     with open(root / "grid" / "manifest.csv", newline="") as fh:
-        for _ in csv.DictReader(fh):
+        for row in csv.DictReader(fh):
             for code in CODES:
                 n_expected[code] = n_expected.get(code, 0) + 1
+            # Group the agreement table by beam energy, which is the axis the
+            # cross-section data constrains least well at its ends.
+            if row.get("ebeam"):
+                ebeam_by_cfg[row["cfg_id"]] = row["ebeam"]
 
     print("== completeness")
     for code in CODES:
@@ -618,6 +623,61 @@ def main(argv: list[str] | None = None) -> int:
         )
     lines.extend(verdict_lines)
     lines.append("")
+
+    # ---- agreement per beam energy
+    #
+    # The grid deliberately spans 2-12 GeV, and the cross-section data constrains
+    # the hadronic amplitude least well at the ends, so a single pooled agreement
+    # number hides the one trend worth seeing.  Report each energy level against
+    # its own noise floor: the same-code run-to-run scatter at that energy, not a
+    # pooled one, so "is this level consistent" is judged against what that level
+    # can actually resolve.
+    if ebeam_by_cfg:
+        lines.append("cross-section agreement by beam energy (valid configs only):")
+        # Per-configuration same-code scatter, computed once per code and reused:
+        # a level's own noise floor is what its two seeds actually resolve.
+        cfg_noise: dict[str, dict[str, float]] = {
+            code: {cfg: rel_scatter({cfg: runs}) for cfg, runs in by_cfg[code].items()}
+            for code in CODES
+        }
+        for code_a, code_b in PAIRS:
+            pair = f"{code_a} vs {code_b}"
+            rows = [r for r in cross_rows if r["pair"] == pair]
+            if not rows:
+                continue
+            lines.append(f"  {pair}")
+            lines.append(
+                f"    {'ebeam':>7s} {'cfgs':>4s} {'median':>9s} {'mean':>9s} "
+                f"{'|d| p90':>9s} {'max|d|':>9s} {'same-code':>10s} {'ratio':>6s}  KS over floor"
+            )
+            energies = sorted({ebeam_by_cfg[r["cfg_id"]] for r in rows}, key=float)
+            for e in energies:
+                sub = [r for r in rows if ebeam_by_cfg[r["cfg_id"]] == e]
+                if not sub:
+                    continue
+                d = np.array(
+                    [(r["sigma_a"] - r["sigma_b"]) / r["sigma_b"] * 100.0 for r in sub],
+                    dtype=float,
+                )
+                noise = []
+                for r in sub:
+                    sa = cfg_noise[code_a].get(r["cfg_id"], float("nan"))
+                    sb = cfg_noise[code_b].get(r["cfg_id"], float("nan"))
+                    if np.isfinite(sa) and np.isfinite(sb):
+                        noise.append(100.0 * np.sqrt((sa**2 + sb**2) / 2.0))
+                over = sum(r["ks_over_floor"] for r in sub)
+                total = sum(r["n_obs"] for r in sub)
+                med = float(np.median(np.abs(d)))
+                same = float(np.median(noise)) if noise else float("nan")
+                ratio = med / same if np.isfinite(same) and same > 0 else float("nan")
+                lines.append(
+                    f"    {float(e):>7.3f} {len(sub):>4d} "
+                    f"{np.median(d):>+8.4f}% {d.mean():>+8.4f}% "
+                    f"{np.percentile(np.abs(d), 90):>8.4f}% {np.abs(d).max():>8.4f}% "
+                    f"{same:>9.4f}% {ratio:>6.2f}  "
+                    f"{over}/{total}"
+                )
+        lines.append("")
     ok_frac = np.mean([r["ok"] for r in ks_rows if r["level"] == "cross"])
     lines.append(
         f"overall: {ok_frac:.1%} of cross-code observable checks within "
