@@ -67,10 +67,37 @@ def quiet_scipy():
         yield
 
 
+# The n-tuple is written with es16.8 (src/aao_rad.f90:1082), so the reference
+# reports 8 significant digits and cannot express anything finer.  The port's npz
+# is float32.
+#
+# That difference is invisible on a continuous observable but catastrophic on a
+# degenerate one.  E_s at ebeam=4.244 GeV is a point mass -- 97% of events sit at
+# exactly the beam energy -- and 4.244 is not representable in binary32, so the
+# same physical value is 4.24399996 in the Fortran's text and 4.24399995803833 in
+# the port's float32.  Two atomic masses 2e-9 apart put the empirical CDFs 97%
+# apart, and KS reported 0.9739 for 16 configurations.
+#
+# Beam energies that *are* exact in binary32 (2.0, 6.0, 12.0) showed no such
+# artifact, which is what pinned it to representation rather than physics.
+FORT_SIG_DIGITS = 8
+
+
 def ks_statistic(a: np.ndarray, b: np.ndarray) -> float:
     with quiet_scipy():
-        stat, _ = ks_test(a, b)
+        stat, _ = ks_test(quantize_sig(a), quantize_sig(b))
     return stat
+
+
+def quantize_sig(x, digits: int = FORT_SIG_DIGITS) -> np.ndarray:
+    """Round to ``digits`` significant decimal digits."""
+    a = np.asarray(x, dtype=float)
+    out = a.copy()
+    live = np.isfinite(a) & (a != 0.0)
+    if live.any():
+        scale = np.power(10.0, digits - 1 - np.floor(np.log10(np.abs(a[live]))))
+        out[live] = np.round(a[live] * scale) / scale
+    return out
 
 
 def fmt(values, spec: str) -> str:
