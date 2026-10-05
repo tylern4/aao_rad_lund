@@ -936,7 +936,19 @@ class EventGenerator:
 
             # Trim the last block so we never emit more events than requested.
             keep = min(produced, total - (n_done - produced))
-            block = np.asarray(jax.device_get(buffer))[:keep]
+            # Copy out only the rows that were actually written, and take an
+            # owning copy of them.  ``buffer`` is (chunk_events, 32) float32 --
+            # 64 MB at the default chunk -- and a run needs thousands of
+            # iterations to reach 20k events at the original's sub-percent
+            # acceptance.  Transferring the whole buffer and then slicing it
+            # hands the caller a *view*, so every yielded block pinned all
+            # 64 MB for as long as the caller kept it, and a caller that
+            # accumulates blocks (the CLI does, to write one npz) grew by
+            # ~192 GB per run.  That was the 103 OOM kills on the 64-worker
+            # arm and the ~100 GB per process on the GPU arm.  Slicing before
+            # device_get also keeps the transfer proportional to the events
+            # produced rather than to the buffer.
+            block = np.array(jax.device_get(buffer[:keep]), copy=True)
 
             is_last = n_done >= total
             if is_last:
