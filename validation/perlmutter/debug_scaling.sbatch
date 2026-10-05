@@ -70,9 +70,11 @@ echo "nproc: $(nproc)   threads visible"
 echo "card: $CARD"
 EVENTS=${AAO_SCALING_EVENTS:-500}
 
-# run_case <label> <n> <cache-dir|none>
+NCPU=$(python3 -c 'import os; print(len(os.sched_getaffinity(0)))' 2>/dev/null || echo 1)
+
+# run_case <label> <n> <cache-dir|none> [pinned]
 run_case() {
-  local label=$1 n=$2 cachedir=$3
+  local label=$1 n=$2 cachedir=$3 pinned=${4:-no}
   local d="$ROOT/$label"
   rm -rf "$d"; mkdir -p "$d/cache" "$d/runs"
 
@@ -83,13 +85,20 @@ run_case() {
   fi
 
   echo
-  echo "== $label: $n concurrent processes, events $EVENTS, cache ${cachedir##*/}"
+  echo "== $label: $n concurrent processes, events $EVENTS, cache ${cachedir##*/}, affinity $pinned"
   local start=$SECONDS
   local pids=""
   for i in $(seq 1 "$n"); do
     mkdir -p "$d/runs/r$i"
     cp "$CARD" "$d/runs/r$i/run_card.txt"
-    ( cd "$d/runs/r$i" && exec timeout "${CASE_CAP:-180}" "$PY" -m aao_rad.cli \
+    # "pinned" reproduces what run_batch.py does to every port run: one logical
+    # CPU each, round-robin over the affinity mask.
+    local pre=()
+    if [ "$pinned" = "pinned" ]; then
+      pre=(taskset -c "$(( (i - 1) % NCPU ))")
+    fi
+    ( cd "$d/runs/r$i" && exec timeout "${CASE_CAP:-180}" \
+        ${pre[@]+"${pre[@]}"} "$PY" -m aao_rad.cli \
         --legacy-input run_card.txt --parms "$REPO/parms" \
         --n-events "$EVENTS" --seed $((8675309 + i)) \
         --ek-sampling fortran --format npz \
@@ -126,6 +135,12 @@ done
 # The worst level again, with no persistent cache at all: separates "too many XLA
 # runtimes" from "128 processes fighting over file locks in one cache".
 run_case "nocache_n128" 128 none
+# And the worst level again with the affinity mask applied, which is the one
+# difference left between this probe and the arm that failed.  Every port run
+# gets `taskset -c <one logical CPU>` from run_batch.py; these cases run without
+# one and complete in ~2 minutes, so if this one collapses, the pinning is what
+# stops the arm rather than the process count.
+run_case "pinned_n128" 128 "$FRESH/p128" pinned
 
 echo
 echo "== summary (finished / launched, wall seconds)"
