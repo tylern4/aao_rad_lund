@@ -301,8 +301,18 @@ def build_job(
     run_dir.mkdir(parents=True, exist_ok=True)
 
     card = run_dir / "run_card.txt"
-    if not card.is_file():
-        shutil.copy(root / "grid" / f"{run['cfg_id']}.txt", card)
+    grid_card = root / "grid" / f"{run['cfg_id']}.txt"
+    # Always refresh from the grid rather than keeping whatever the directory
+    # already holds.  A configuration whose event quota was cut to keep
+    # integer*4 ntries inside 2**31 reaches the Fortran only through this card,
+    # so a copy left over from the first attempt would run the original quota,
+    # wrap the counter exactly as before, and print a cross section that looks
+    # no different from the last one's.
+    if not grid_card.is_file():
+        sys.exit(f"run card missing from the grid: {grid_card}")
+    if card.is_file() and card.read_bytes() != grid_card.read_bytes():
+        print(f"  {run['run_id']}: run card refreshed from {grid_card.name}")
+    shutil.copy(grid_card, card)
 
     env = dict(os.environ)
 
@@ -481,6 +491,31 @@ def select_pending(args, runs: list[dict], root: Path) -> tuple[list[dict], bool
     return pending, rerun
 
 
+def clear_stale_outputs(runs: list[dict], code: str, root: Path) -> int:
+    """Delete a run's previous outputs so the earlier attempt cannot stand in.
+
+    The n-tuple is opened without ``status='replace'`` (src/aao_rad.f90:410), so
+    a re-run rewinds and overwrites *from the start* and leaves the old tail
+    behind.  At a reduced quota of 15,366 events over a file holding 20,000, the
+    verifier would count 20,000 records, find at least 15,366 of them, and pass
+    an n-tuple whose last 4,634 events came from a run that no longer exists --
+    the same stale tail that made the eleven truncated references unusable in the
+    first place, arriving through the fix for them.
+
+    ``out.txt`` goes too.  It is truncated when the job opens it, but leaving it
+    here means a job that dies before writing anything still has a previous
+    run's cross section on disk.
+    """
+    removed = 0
+    for run in runs:
+        run_dir = root / code / run["run_id"]
+        for name in ("aao_rad.ntuple", "out.npz", "out.txt"):
+            if (run_dir / name).exists():
+                (run_dir / name).unlink()
+                removed += 1
+    return removed
+
+
 def run_all(args, runs: list[dict], root: Path, repo: Path) -> int:
     gpus = args.gpus
     workers = args.jobs or (gpus if gpus else os.cpu_count() or 1)
@@ -503,6 +538,11 @@ def run_all(args, runs: list[dict], root: Path, repo: Path) -> int:
             )
             print("would run:", " ".join(job[0]))
         return 0
+
+    # After the dry run, so asking what would happen costs nothing.
+    cleared = clear_stale_outputs(pending, args.code, root)
+    if cleared:
+        print(f"removed {cleared} file(s) left by earlier attempts")
 
     warmup_cache(args, pending, root, repo, gpus)
 

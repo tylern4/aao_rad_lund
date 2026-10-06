@@ -222,3 +222,82 @@ def test_the_override_file_can_be_passed_straight_through(tmp_path):
     )
     assert r.returncode == 0, r.stderr or r.stdout
     assert r.stdout.count("would run:") == 2, r.stdout
+
+
+# ------------------------------------------------------- stale outputs on a rerun
+
+
+def test_the_previous_n_tuple_is_cleared_before_a_rerun(tmp_path):
+    """The Fortran opens its n-tuple without status='replace', so a re-run
+    rewinds and overwrites from the start, leaving the old tail behind.  A
+    reduced quota over a longer old file would hand the verifier records from a
+    run that no longer exists -- and it would pass, because the file is longer
+    than the quota."""
+    root = tmp_path / "scan"
+    run = {"run_id": "cfg_001_s0", "cfg_id": "cfg_001"}
+    d = root / "fortran" / "cfg_001_s0"
+    d.mkdir(parents=True)
+    (d / "aao_rad.ntuple").write_bytes(b"x" * 800 * 20_000)
+    (d / "out.txt").write_text("previous run's cross section\n")
+    (d / "unrelated").write_text("keep me")
+
+    removed = rb.clear_stale_outputs([run], "fortran", root)
+    assert removed == 2
+    assert not (d / "aao_rad.ntuple").exists()
+    assert not (d / "out.txt").exists()
+    assert (d / "unrelated").read_text() == "keep me"
+
+
+def test_only_the_runs_being_run_are_cleared(tmp_path):
+    root = tmp_path / "scan"
+    for rid in ("cfg_001_s0", "cfg_002_s0"):
+        d = root / "fortran" / rid
+        d.mkdir(parents=True)
+        (d / "aao_rad.ntuple").write_bytes(b"x")
+    rb.clear_stale_outputs([{"run_id": "cfg_001_s0", "cfg_id": "cfg_001"}], "fortran", root)
+    assert not (root / "fortran" / "cfg_001_s0" / "aao_rad.ntuple").exists()
+    assert (root / "fortran" / "cfg_002_s0" / "aao_rad.ntuple").exists()
+
+
+def test_nothing_left_to_clear_is_not_an_error(tmp_path):
+    assert rb.clear_stale_outputs([], "fortran", tmp_path) == 0
+
+
+# ------------------------------------------------------------- the run card
+
+
+def test_a_reduced_quota_reaches_the_run_card(tmp_path):
+    """Without this the Fortran would keep generating the original quota, wrap
+    its counter exactly as before, and print a cross section that looks no
+    different from the rejected one."""
+    root = tmp_path / "scan"
+    mark_complete(root, "py_cpu", "cfg_001_s0", "cfg_001")
+    write_manifest(root, [("cfg_001_s0", "cfg_001")])
+    (root / "grid" / "cfg_001.txt").write_text("7\n5412\n")
+    stale = root / "py_cpu" / "cfg_001_s0" / "run_card.txt"
+    stale.write_text("7\n20000\n")
+
+    r = subprocess.run(
+        [sys.executable, str(DRIVER), "--code", "py_cpu", "--root", str(root),
+         "--only-cfg", "cfg_001", "--dry-run"],
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 0, r.stderr or r.stdout
+    assert stale.read_text() == "7\n5412\n", "the stale card survived"
+    assert "run card refreshed" in r.stdout, r.stdout
+
+
+def test_an_unchanged_card_is_left_quiet(tmp_path):
+    root = tmp_path / "scan"
+    mark_complete(root, "py_cpu", "cfg_001_s0", "cfg_001")
+    write_manifest(root, [("cfg_001_s0", "cfg_001")])
+    card = root / "grid" / "cfg_001.txt"
+    (root / "py_cpu" / "cfg_001_s0" / "run_card.txt").write_text(card.read_text())
+
+    r = subprocess.run(
+        [sys.executable, str(DRIVER), "--code", "py_cpu", "--root", str(root),
+         "--only-cfg", "cfg_001", "--dry-run"],
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 0, r.stderr or r.stdout
+    assert "run card refreshed" not in r.stdout, r.stdout
