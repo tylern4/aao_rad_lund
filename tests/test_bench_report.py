@@ -1,19 +1,26 @@
 """The speedup benchmark's timing and throughput report.
 
-``run_batch.py`` prints a run's elapsed time only every twentieth completion
-(``run_batch.py:599``), so a four-run batch prints none -- the benchmark's
-timings are read off the filesystem instead, from the ``out.txt`` that
-``execute()`` opens with mode ``"wb"`` immediately before launching the
-process.  These tests pin down what that reading means: which runs it is valid
-for, how a startup is separated from a loop, and how a reduced quota is scaled
-back to a production-length run so node-hours can be compared between two arms
-that deliberately ran different amounts of work.
+The wall clock is the driver's own: ``run_batch.execute()`` brackets the child
+process with ``time.time()`` and writes ``timing.json`` beside ``out.txt``,
+which the report then reads.  These tests pin down what that reading means --
+that the driver's timing wins over the file timestamps, that the filesystem
+fallback is labelled instead of silently trusted, how a startup is separated
+from a loop, and how a reduced quota is scaled back to a production-length run
+so node-hours can be compared between two arms that deliberately ran different
+amounts of work.
+
+The reason the driver's bracket exists rather than a timestamp reading is on
+record here: on Perlmutter ``stat -c %W`` reports the Lustre server's clock,
+~490 s behind the node's, while mtime is stamped by the node -- so
+birth-to-mtime measured the skew, reported a 21 s run as 511 s, and handed the
+490 s back as "compile time".
 """
 
 from __future__ import annotations
 
 import csv
 import importlib.util
+import json
 import os
 import sys
 import time
@@ -23,6 +30,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 REPORT = ROOT / "validation" / "perlmutter" / "bench_report.py"
+RUN_BATCH = ROOT / "validation" / "perlmutter" / "run_batch.py"
 OVERRIDES = ROOT / "validation" / "perlmutter" / "bench_events.csv"
 OVERRIDES_LOADER = ROOT / "validation" / "perlmutter" / "make_grid.py"
 
@@ -63,6 +71,23 @@ def write(path: Path, text: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text)
     return path
+
+
+def write_timing(run_dir: Path, wall: float, start: float = 1_000.0) -> Path:
+    """What ``run_batch.execute()`` writes once the child has exited."""
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return write(
+        run_dir / "timing.json",
+        json.dumps(
+            {
+                "run_id": run_dir.name,
+                "start": start,
+                "end": start + wall,
+                "wall": wall,
+                "rc": 0,
+            }
+        ),
+    )
 
 
 def test_port_summary_is_read_as_one_run(tmp_path: Path):
@@ -141,7 +166,8 @@ def test_fortran_projection_scales_linearly(tmp_path: Path):
     assert rec["proj"] == pytest.approx(rec["wall"] * 20_000 / rec["events"])
 
 
-def test_wall_clock_runs_from_birth_to_last_write(tmp_path: Path):
+def test_filesystem_fallback_runs_from_birth_to_last_write(tmp_path: Path):
+    """The pre-timing.json route, kept for runs that predate the driver's clock."""
     out = write(tmp_path / "cfg_000_s0" / "out.txt", PORT_SUMMARY)
     born = br.birth_time(out)
     if born is None:
@@ -153,6 +179,78 @@ def test_wall_clock_runs_from_birth_to_last_write(tmp_path: Path):
     os.utime(out, (future, future))
     rec = br.read_run(out)
     assert 95 <= rec["wall"] <= 110
+    assert rec["wall_source"] == "filesystem"
+
+
+def test_driver_timing_wins_over_the_filesystem_clock(tmp_path: Path):
+    """Pscratch's birth time is the Lustre *server's* clock, ~490 s behind the
+    node's, so birth-to-mtime measures the skew between two clocks: a 21 s run
+    reported 511 s and the 490 s came back out as compile time.  The driver's
+    own bracket around the child is the only reading that is a duration."""
+    out = write(tmp_path / "cfg_000_s0" / "out.txt", PORT_SUMMARY)
+    write_timing(out.parent, wall=21.0)
+    # A file timestamp far enough in the future that the skew would be visible.
+    future = time.time() + 500
+    os.utime(out, (future, future))
+    rec = br.read_run(out)
+    assert rec["wall"] == pytest.approx(21.0)
+    assert rec["wall_source"] == "driver"
+
+
+def test_a_zero_wall_clock_is_not_a_wall_clock(tmp_path: Path):
+    """A truncated timing.json must not beat a usable fallback."""
+    out = write(tmp_path / "cfg_000_s0" / "out.txt", PORT_SUMMARY)
+    write_timing(out.parent, wall=0.0)
+    rec = br.read_run(out)
+    assert rec["wall_source"] != "driver"
+
+
+def test_a_fallback_wall_clock_is_flagged_not_presented(tmp_path: Path, capsys):
+    """A skewed wall biases the speedup against whichever arm timed that way,
+    and no number in the table looks wrong while it does -- so the report says
+    how many of them it is guessing at."""
+    out = write(tmp_path / "cfg_000_s0" / "out.txt", PORT_SUMMARY)
+    rec = br.derive(br.read_run(out))
+    if rec["wall_source"] is None:
+        pytest.skip("this platform exposes no birth time")
+    assert rec["wall_source"] == "filesystem"
+    summary = br.report("legacy runs", [rec], concurrency=4)
+    text = capsys.readouterr().out
+    assert "WARNING" in text
+    assert "490 s" in text
+    assert summary["filesystem_timed"] == 1
+
+
+def test_driver_timed_runs_are_not_flagged(tmp_path: Path, capsys):
+    out = write(tmp_path / "cfg_000_s0" / "out.txt", PORT_SUMMARY)
+    write_timing(out.parent, wall=12.0)
+    summary = br.report("warm", [br.derive(br.read_run(out))], concurrency=4)
+    assert "WARNING" not in capsys.readouterr().out
+    assert summary["filesystem_timed"] == 0
+    assert summary["median_wall"] == pytest.approx(12.0)
+
+
+def test_execute_writes_the_timing_the_report_reads(tmp_path: Path):
+    """The writer and the reader have to agree, and only a round trip through
+    the real ``execute()`` proves both."""
+    rb = _load(RUN_BATCH, "aao_run_batch_for_timing")
+    run_dir = tmp_path / "cfg_000_s0"
+    run_dir.mkdir()  # build_job creates it in production; execute() assumes it
+    name, rc, dt = rb.execute(
+        ([sys.executable, "-c", "print('ok')"], os.environ.copy(), run_dir, None)
+    )
+    assert name == "cfg_000_s0"
+    assert rc == 0
+    data = json.loads((run_dir / "timing.json").read_text())
+    assert data["rc"] == 0
+    assert data["end"] >= data["start"]
+    assert data["wall"] == pytest.approx(dt, rel=1e-6)
+    assert data["wall"] > 0
+
+    rec = br.read_run(run_dir / "out.txt")
+    assert rec["wall_source"] == "driver"
+    assert rec["wall"] == pytest.approx(dt, rel=1e-6)
+    assert "ok" in (run_dir / "out.txt").read_text()
 
 
 def test_report_renders_medians_and_node_hours(tmp_path: Path, capsys):

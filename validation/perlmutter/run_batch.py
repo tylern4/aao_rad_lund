@@ -50,6 +50,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -412,7 +413,30 @@ def execute(job: tuple[list[str], dict, Path, Path | None]) -> tuple[str, int, f
     finally:
         if stdin_path:
             stdin_fh.close()
-    return run_dir.name, proc.returncode, time.time() - t0
+    t1 = time.time()
+
+    # The one honest record of when this run happened.  Inferring it from the
+    # output file's own timestamps does not work on Lustre: `stat -c %W` reports
+    # the *server's* clock, which on Perlmutter lags the node by ~8 minutes, so
+    # birth-to-mtime measured the skew between two clocks rather than the run --
+    # it put 490 s of "startup" under every port process and made a 21 s run
+    # read as 511 s.  Written beside out.txt so an archived copy carries its own
+    # timing with it, and never allowed to fail a run.
+    try:
+        (run_dir / "timing.json").write_text(
+            json.dumps(
+                {
+                    "run_id": run_dir.name,
+                    "start": t0,
+                    "end": t1,
+                    "wall": t1 - t0,
+                    "rc": proc.returncode,
+                }
+            )
+        )
+    except OSError:
+        pass
+    return run_dir.name, proc.returncode, t1 - t0
 
 
 def md5(path: Path) -> str:
@@ -504,12 +528,14 @@ def clear_stale_outputs(runs: list[dict], code: str, root: Path) -> int:
 
     ``out.txt`` goes too.  It is truncated when the job opens it, but leaving it
     here means a job that dies before writing anything still has a previous
-    run's cross section on disk.
+    run's cross section on disk.  ``timing.json`` for the matching reason: it is
+    written only once the child exits, so a job that dies before that would
+    otherwise leave an earlier attempt's wall clock to be read as this one's.
     """
     removed = 0
     for run in runs:
         run_dir = root / code / run["run_id"]
-        for name in ("aao_rad.ntuple", "out.npz", "out.txt"):
+        for name in ("aao_rad.ntuple", "out.npz", "out.txt", "timing.json"):
             if (run_dir / name).exists():
                 (run_dir / name).unlink()
                 removed += 1
@@ -638,6 +664,7 @@ def check_collisions(runs: list[dict], root: Path, repo: Path) -> int:
             run_dir = root / "fortran" / run["run_id"]
             (run_dir / "aao_rad.ntuple").unlink(missing_ok=True)
             (run_dir / "out.txt").unlink(missing_ok=True)
+            (run_dir / "timing.json").unlink(missing_ok=True)
         for run in pairs[cfg_id]:
             job = build_job(run, "fortran", root, repo, sys.executable, 0, 1, 0, 0)
             _, rc, dt = execute(job)

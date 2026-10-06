@@ -1,26 +1,27 @@
 #!/usr/bin/env python3
 """Wall clock, throughput and node-hours for the speedup benchmark.
 
-The timing comes from the filesystem, not from the driver.  ``run_batch.py``
-prints a run's elapsed time only on every twentieth completion or on failure
-(``run_batch.py:599``), so a four-run batch never reaches that gate and prints
-no timings at all.  ``execute()`` opens ``out.txt`` with mode ``"wb"``
-immediately before launching the process (``run_batch.py:408``), so in a root
-that has never been used the file's birth time *is* the launch instant and its
-mtime the moment the child's last write landed.  Birth to mtime is then the
-run's wall clock with the driver's own overhead included, which is the number
-that has to be used for node-hours.
+The wall clock comes from ``timing.json``, which ``run_batch.execute()`` writes
+after the child exits: ``start``, ``end``, ``wall`` and the return code.  That
+is the driver's own ``time.time()`` bracket around the process, and it is the
+number node-hours have to be computed from.
 
-Two conditions, both of which the benchmark sets up deliberately:
+Reading the clock off the filesystem instead -- ``out.txt``'s birth time to its
+mtime -- is kept only as a fallback, and the report flags when it was used,
+because on Perlmutter it is wrong in a way the numbers do not reveal.  ``stat
+-c %W`` reports the Lustre *server's* clock while mtime is stamped by the node,
+and the two disagree by ~490 s; birth-to-mtime therefore measured a clock skew
+and charged it to every run.  The first benchmark's pass 1 reported 490.0 s for
+all eight runs -- identical, because they were all reading the same constant --
+for runs that had each taken about 20 s, and the 490 s of "startup" derived
+from it was that skew rather than a compilation.
 
-*   **The run must be a first attempt.**  ``"wb"`` truncates without resetting
-    the birth time, so a run that was killed and retried spans both attempts
-    plus the idle gap between them.  In the production scan 117 of 174 clean
-    Fortran runs had a median 19.5-hour gap of exactly that kind -- a job
-    waiting for its next allocation.  A benchmark root is fresh, so every run
-    here is one attempt; ``run_one.sh``-style re-runs into the same root would
-    invalidate that and are why each pass archives its ``out.txt`` before the
-    next one starts.
+Recording the timing in the driver also removes the conditions the filesystem
+method had to impose.  A retried run overwrites its own ``timing.json``, so the
+wall clock belongs to one attempt instead of spanning two attempts plus the
+idle gap between them -- in the production scan 117 of 174 clean Fortran runs
+had a median 19.5-hour gap of exactly that kind.  What still matters is:
+
 *   **The run must have finished.**  A process stopped by the wall limit would
     otherwise report a wall clock equal to the limit and a rate made almost
     entirely of the time it did not finish in.  Completeness is therefore the
@@ -43,6 +44,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import statistics
 import subprocess
@@ -86,6 +88,10 @@ def birth_time(path: Path) -> float | None:
     the portable route there is coreutils' ``%W`` -- which is what the Perlmutter
     jobs use.  ``%W`` prints 0 when the filesystem cannot say, and 0 is not an
     epoch worth reporting, so it becomes None rather than a wall clock of 1970.
+
+    On Lustre a non-zero value is not to be trusted either: it is the server's
+    clock, and Pscratch's runs ~490 s behind the node's.  This is only ever used
+    when ``timing.json`` is missing, and the report says so.
     """
     st = path.stat()
     bt = getattr(st, "st_birthtime", None)
@@ -104,6 +110,25 @@ def birth_time(path: Path) -> float | None:
     return float(value) or None
 
 
+def driver_timing(path: Path) -> dict | None:
+    """The ``timing.json`` ``run_batch.execute()`` wrote next to *path*.
+
+    Absent for anything run before the driver recorded it, and unreadable
+    rather than fatal if a run died before writing one -- a missing timing is a
+    fallback, not an error.
+    """
+    try:
+        data = json.loads((path.parent / "timing.json").read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    wall = data.get("wall")
+    if not isinstance(wall, (int, float)) or wall <= 0:
+        return None
+    return data
+
+
 def read_run(path: Path) -> dict:
     """Parse one run's ``out.txt`` into counts, completion and wall clock."""
     rec: dict = {
@@ -114,6 +139,7 @@ def read_run(path: Path) -> dict:
         "trials": None,
         "loop": None,
         "wall": None,
+        "wall_source": None,
     }
     try:
         text = path.read_text(errors="replace")
@@ -150,9 +176,19 @@ def read_run(path: Path) -> dict:
             else:
                 rec["kind"] = "?"
 
+    # Driver timing wins: it is the driver's own clock around the child.
+    # Birth-to-mtime is the fallback for anything run before the driver wrote
+    # one, and it is labelled so the report can say how many runs it is guessing
+    # at rather than presenting a skewed number as a measurement.
+    timing = driver_timing(path)
+    if timing is not None:
+        rec["wall"] = float(timing["wall"])
+        rec["wall_source"] = "driver"
+        return rec
     born = birth_time(path)
     if born is not None:
         rec["wall"] = max(path.stat().st_mtime - born, 0.0)
+        rec["wall_source"] = "filesystem"
     return rec
 
 
@@ -234,6 +270,18 @@ def report(label: str, recs: list[dict], concurrency: int = 1,
     good = [r for r in recs if r["complete"] and r["proj"]]
     print(f"  {len(good)}/{len(recs)} complete")
     summary["complete"] = len(good)
+    # Say how many of these are measurements.  A filesystem-timed run on Lustre
+    # carries the server/node clock skew as a constant, which reads as a larger
+    # wall and so a slower rate -- it biases the speedup *against* whichever arm
+    # timed that way, quietly, with no number in the table looking wrong.
+    guessed = [r for r in recs if r.get("wall_source") == "filesystem"]
+    summary["filesystem_timed"] = len(guessed)
+    if guessed:
+        print(
+            f"  WARNING: {len(guessed)}/{len(recs)} wall clock(s) read off the "
+            f"filesystem because timing.json was missing; on Lustre those add the "
+            f"~490 s server/node skew and are upper bounds, not measurements"
+        )
     if not good:
         return summary
 

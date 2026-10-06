@@ -3,18 +3,28 @@
 # one PM-GPU node, once with an empty XLA cache and once with the cache the
 # first pass filled.
 #
-# Why two passes.  The port's production wall clock is the loop (a few tens of
-# seconds) plus ~457 s of something that happens before it, and nothing had
-# measured what that something is.  The split is real: generate.py starts its
-# own clock at t_start (generate.py:863) and reports the two apart as
-# `startup` and `wall time` in bench_report.py.  run_batch.py's warm-up runs one
-# throwaway process before the fan-out (run_batch.py:446), but _make_sampler and
-# _make_stepper bake the kinematics and the batch size into the compiled
-# program (generate.py:742-755), so a warm-up of runs[0] warms exactly one of
-# the 96 configurations and the other 95 compile themselves inside the fan-out.
-# If pass 2's startup collapses from ~457 s to a few seconds, that is the
-# compile and the fix is a per-configuration warm-up; if it does not move, it is
-# fixed interpreter/import/table cost and no cache will help.
+# Why two passes.  The port's wall clock splits into a loop (a few tens of
+# seconds) and everything before it, and the question is how much of that
+# preamble is compilation rather than fixed interpreter cost.  The split is
+# real: generate.py starts its own clock at t_start (generate.py:863) and
+# reports the two apart as `startup` and `wall time` in bench_report.py.
+# run_batch.py's warm-up runs one throwaway process before the fan-out
+# (run_batch.py:446), but _make_sampler and _make_stepper bake the kinematics
+# and the batch size into the compiled program (generate.py:742-755), so a
+# warm-up of runs[0] warms exactly one of the 96 configurations and the other
+# 95 compile themselves inside the fan-out.  Pass 1 starts from an empty XLA
+# cache and pass 2 from the one pass 1 filled: startup falling from pass 1 to
+# pass 2 is the compile, startup not moving is fixed interpreter/import/table
+# cost that no cache will help.
+#
+# The ~457 s of startup this script was originally written to explain was not
+# a measurement of either.  It was birth-to-mtime, and on Lustre `stat -c %W`
+# reports the *server's* clock while mtime is stamped by the node -- a ~490 s
+# skew charged to every run, which is why the first submission read 490.0 s
+# for eight runs that had each taken about twenty seconds.  bench_report.py
+# now takes the wall clock from the driver's own timing.json
+# (run_batch.execute), so this is the first submission whose two passes
+# compare a real compile against a real compile.
 #
 # Why the full 20,000-event quota.  This arm is the one whose loop time is
 # compared against the Fortran's, and at production length the loop is 20-70 s
@@ -46,7 +56,8 @@
 #SBATCH --gpus=4
 #SBATCH --exclusive
 # The debug QoS refuses anything longer (QOSMaxWallDurationPerJobLimit).  The
-# two passes come to ~11 minutes of work; the rest is queueing slack.
+# first submission's two passes took 145 s of job time in all; the rest is
+# queueing slack.
 #SBATCH --time=00:30:00
 
 set -euo pipefail
@@ -113,6 +124,15 @@ archive() {
     [ -f "$d/out.txt" ] || continue
     mkdir -p "$dest/$(basename "$d")"
     cp -f "$d/out.txt" "$dest/$(basename "$d")/"
+    # timing.json has to travel with out.txt.  It holds the driver's absolute
+    # start and end epochs for *this* pass, and pass 2 overwrites both files in
+    # the live directory -- so a report run against the archive without it would
+    # fall back to the filesystem clock, which on Lustre is the server's clock
+    # and ~490 s behind the node's.  cp is safe with it because the epochs inside
+    # are absolute; nothing here depends on the copy's own timestamps.
+    if [ -f "$d/timing.json" ]; then
+      cp -f "$d/timing.json" "$dest/$(basename "$d")/"
+    fi
   done
 }
 
