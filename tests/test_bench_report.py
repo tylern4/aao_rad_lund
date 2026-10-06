@@ -287,6 +287,27 @@ def test_main_finds_runs_and_reports_a_missing_directory(tmp_path: Path, capsys)
     assert br.main([str(empty)]) == 1
 
 
+def test_main_can_write_its_summary_as_json(tmp_path: Path):
+    """The packing probe compares two arms' node-hours in one job; scraping that
+    out of the table would make the comparison depend on its column widths."""
+    out = write(tmp_path / "runs" / "cfg_000_s0" / "out.txt", PORT_SUMMARY)
+    write_timing(out.parent, wall=12.0)
+    dump = tmp_path / "summary.json"
+    argv = [str(tmp_path / "runs"), "--concurrency", "128", "--json", str(dump)]
+    assert br.main(argv) == 0
+
+    summary = json.loads(dump.read_text())
+    assert summary["median_wall"] == pytest.approx(12.0)
+    assert summary["node_hours"] == pytest.approx(summary["median_proj"] / 3600 / 128)
+    assert summary["filesystem_timed"] == 0
+
+
+def test_main_without_json_flag_leaves_no_file(tmp_path: Path, capsys):
+    write(tmp_path / "runs" / "cfg_000_s0" / "out.txt", PORT_SUMMARY)
+    assert br.main([str(tmp_path / "runs")]) == 0
+    assert list(tmp_path.glob("*.json")) == []
+
+
 def test_concurrency_scales_the_node_hours(tmp_path: Path):
     out = write(tmp_path / "cfg_000_s0" / "out.txt", PORT_SUMMARY)
     rec = br.derive(br.read_run(out))

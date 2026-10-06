@@ -337,6 +337,13 @@ def main(argv: list[str] | None = None) -> int:
         help="runs in the full grid, for the extrapolated total; 0 suppresses it "
         "(default: %(default)s)",
     )
+    p.add_argument(
+        "--json",
+        type=Path,
+        default=None,
+        help="also write the summary (medians, node_hours, counts) as JSON here, "
+        "for a script comparing two arms without scraping the table",
+    )
     args = p.parse_args(argv)
 
     paths = sorted(args.dir.glob("*/out.txt"))
@@ -347,7 +354,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     recs = [derive(read_run(path), args.target_events) for path in paths]
-    report(args.label or str(args.dir), recs, args.concurrency, args.grid)
+    summary = report(args.label or str(args.dir), recs, args.concurrency, args.grid)
+    if args.json is not None:
+        args.json.write_text(json.dumps(summary, indent=2) + "\n")
     return 0
 
 
