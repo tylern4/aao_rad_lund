@@ -35,6 +35,7 @@ import argparse
 import csv
 import math
 from itertools import product
+from pathlib import Path
 
 # The Fortran hard-codes mp = .938 GeV (see the port's constants module
 # docstring), so the window derivation uses that value: it is what
@@ -106,7 +107,15 @@ def w_of(ebeam: float, q2: float, ep: float) -> float:
 
 
 def card_text(cfg: dict) -> str:
-    """The 22-value legacy card, in the Fortran's prompt order."""
+    """The 22-value legacy card, in the Fortran's prompt order.
+
+    ``n_events`` is read from ``cfg`` rather than the module constant so the card
+    and the manifest can never disagree: a configuration whose event quota was
+    reduced to keep the reference's 32-bit counters inside range must have *both*
+    the run card and the manifest updated, or the Fortran would generate the
+    original quota while the verifier expected the reduced one and reported every
+    run as short.
+    """
     lines = [
         str(THEORY),
         str(cfg["polarized"]),
@@ -121,7 +130,7 @@ def card_text(cfg: dict) -> str:
         f"{Q2_MIN:g} {Q2_MAX:g}",
         f"{cfg['ep_min']:g} {cfg['ep_max']:g}",
         f"{cfg['delta']:g}",
-        str(N_EVENTS),
+        str(cfg.get("n_events", N_EVENTS)),
         f"{FMCALL:g}",
     ]
     return "\n".join(lines) + "\n"
@@ -153,13 +162,41 @@ def check_config(cfg: dict) -> None:
             raise ValueError(f"{tag}: {label} = {w:.3f} leaves [{W_LO}, {W_HI}]")
 
 
-def build_configs() -> list[dict]:
+def load_overrides(path: Path | None) -> dict[str, int]:
+    """``cfg_id,n_events`` rows restricting a configuration's event quota.
+
+    Only a *reduction* is accepted.  The quota exists to keep ``integer*4
+    ntries`` (src/aao_rad.f90:154) inside 2**31 for configurations whose trials
+    per event run to 3e5; raising it would reintroduce the overflow this is for,
+    and a quota above the default is never useful.
+    """
+    if path is None:
+        return {}
+    out: dict[str, int] = {}
+    with open(path, newline="") as fh:
+        for row in csv.DictReader(fh):
+            cfg_id, raw = row["cfg_id"].strip(), row["n_events"].strip()
+            n = int(raw)
+            if n <= 0:
+                raise ValueError(f"{path}: {cfg_id} has non-positive n_events {n}")
+            if n > N_EVENTS:
+                raise ValueError(
+                    f"{path}: {cfg_id} asks for {n} events, more than the "
+                    f"standard quota of {N_EVENTS}"
+                )
+            out[cfg_id] = n
+    return out
+
+
+def build_configs(overrides: dict[str, int] | None = None) -> list[dict]:
+    overrides = overrides or {}
     cfgs = []
     idx = 0
     for ebeam, channel, pol, delta, targ in product(ENERGIES, CHANNELS, POLARIZED, DELTAS, TARGETS):
         ep_min, ep_max = ep_window(ebeam, channel)
+        cfg_id = f"cfg_{idx:03d}"
         cfg = {
-            "cfg_id": f"cfg_{idx:03d}",
+            "cfg_id": cfg_id,
             "ebeam": ebeam,
             "channel": channel,
             "channel_name": CHANNEL_NAME[channel],
@@ -170,7 +207,7 @@ def build_configs() -> list[dict]:
             "q2_max": Q2_MAX,
             "ep_min": ep_min,
             "ep_max": ep_max,
-            "n_events": N_EVENTS,
+            "n_events": overrides.get(cfg_id, N_EVENTS),
         }
         check_config(cfg)
         cfgs.append(cfg)
@@ -185,6 +222,21 @@ def main() -> int:
         default=None,
         help="scan root (default: $AAO_SCAN_ROOT or $SCRATCH/aao_rad_scan)",
     )
+    p.add_argument(
+        "--n-events-override",
+        default=None,
+        type=Path,
+        help=(
+            "CSV of cfg_id,n_events restricting those configurations' event "
+            "quota; applied to the run cards and the manifest together so the "
+            "Fortran and the verifier always agree on the quota.  Defaults to "
+            "<root>/grid/n_events_override.csv when that exists, because every "
+            "sbatch script re-runs this with only --root: an override passed as "
+            "a flag alone would be silently dropped the next time any job "
+            "started, and the quota it set would survive only in the file it "
+            "rewrote."
+        ),
+    )
     args = p.parse_args()
 
     import os
@@ -197,7 +249,18 @@ def main() -> int:
     grid_dir = f"{root}/grid"
     os.makedirs(grid_dir, exist_ok=True)
 
-    cfgs = build_configs()
+    override_path = args.n_events_override
+    if override_path is None:
+        default_path = Path(grid_dir) / "n_events_override.csv"
+        override_path = default_path if default_path.is_file() else None
+    overrides = load_overrides(override_path)
+    if overrides:
+        print(
+            f"event quotas overridden for {len(overrides)} configuration(s) "
+            f"from {override_path}"
+        )
+
+    cfgs = build_configs(overrides)
 
     for cfg in cfgs:
         path = os.path.join(grid_dir, f"{cfg['cfg_id']}.txt")
