@@ -1,0 +1,5 @@
+cfg_id,n_events,trials_per_event,trials_per_second
+cfg_000,489,16181,13193
+cfg_034,504,7849,6599
+cfg_064,2006,24909,83309
+cfg_082,5970,10945,108907
