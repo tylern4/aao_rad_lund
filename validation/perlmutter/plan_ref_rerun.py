@@ -220,8 +220,21 @@ def main() -> int:
         w.writerow(["cfg_id", "n_events"])
         for cfg, e in sorted(reduced.items()):
             w.writerow([cfg, e["n_events"]])
-    print(f"\nwrote {len(reduced)} override(s) to {out}")
-    print("re-run make_grid.py to apply them to the run cards and the manifest")
+    print(f"\nwrote {len(reduced)} quota override(s) to {out}")
+
+    # The override covers only the configurations whose quota changed, but the
+    # eleven killed mid-run have to be re-run too, at the full quota.  Writing
+    # both lists means the batch selects the same set the plan diagnosed rather
+    # than a transcribed one -- and ``--only-cfg`` reads a plain id file.
+    rerun = root / "grid" / "rerun_configs.txt"
+    rerun.write_text("".join(f"{cfg}\n" for cfg in sorted(entries)))
+    print(f"wrote all {len(entries)} configuration(s) to rerun to {rerun}")
+    print(
+        "\napply the quota, then re-run those configurations:\n"
+        f"  make_grid.py --root {root}\n"
+        f"  run_batch.py --code fortran --root {root} "
+        f"--only-cfg @{rerun} --check-collisions"
+    )
     return 0
 
 

@@ -300,3 +300,51 @@ def test_a_clean_scan_says_there_is_nothing_to_do(tmp_path):
     )
     assert r.returncode == 0, r.stderr
     assert "nothing to do" in r.stdout
+
+
+def test_the_write_selects_every_unusable_configuration_not_just_the_reduced(tmp_path):
+    """--only-cfg has to pick up the eleven killed mid-run as well; they keep the
+    standard quota, so they appear in no override file and would otherwise be
+    silently left out of the batch that is meant to rebuild them."""
+    root = tmp_path / "scan"
+    # wrapped counter: needs a smaller quota
+    write_run(root, "cfg_040_s0", 20_000, progress=[(30_000_000, 100)],
+              final=(-1, -1), records=20)
+    # truncated n-tuple only: needs a rerun, but no reduction
+    write_run(root, "cfg_002_s0", 20_000, progress=[(3_000, 800)], records=10)
+    write_manifest(root, [("cfg_040_s0", "cfg_040", 20_000),
+                          ("cfg_002_s0", "cfg_002", 20_000)])
+
+    r = subprocess.run(
+        [sys.executable, str(PERLMUTTER / "plan_ref_rerun.py"),
+         "--root", str(root), "--write"],
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 0, r.stderr
+
+    override = list(csv.DictReader(open(root / "grid" / "n_events_override.csv")))
+    assert [row["cfg_id"] for row in override] == ["cfg_040"], "only the quota changes"
+
+    selected = (root / "grid" / "rerun_configs.txt").read_text().split()
+    assert sorted(selected) == ["cfg_002", "cfg_040"], selected
+
+
+def test_the_ids_the_plan_writes_are_the_ids_the_batch_accepts(tmp_path):
+    """The two halves of the workflow have to agree on format."""
+    root = tmp_path / "scan"
+    write_run(root, "cfg_040_s0", 20_000, progress=[(30_000_000, 100)],
+              final=(-1, -1), records=20)
+    write_manifest(root, [("cfg_040_s0", "cfg_040", 20_000)])
+    subprocess.run(
+        [sys.executable, str(PERLMUTTER / "plan_ref_rerun.py"),
+         "--root", str(root), "--write"],
+        capture_output=True, text=True, check=True,
+    )
+
+    sys.path.insert(0, str(PERLMUTTER))
+    import run_batch  # noqa: E402
+    ids = run_batch.parse_only_cfg(f"@{root / 'grid' / 'rerun_configs.txt'}")
+    assert ids == {"cfg_040"}
+    assert run_batch.parse_only_cfg(
+        f"@{root / 'grid' / 'n_events_override.csv'}"
+    ) == {"cfg_040"}
