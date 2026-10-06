@@ -79,6 +79,51 @@ def load_manifest(root: Path) -> list[dict]:
         return list(csv.DictReader(fh))
 
 
+def parse_only_cfg(spec: str) -> set[str] | None:
+    """Configuration ids from ``--only-cfg``: a comma list, or ``@path``.
+
+    The file form takes one id per line or a CSV column headed ``cfg_id`` so the
+    output of ``plan_ref_rerun.py --write`` can be passed straight through,
+    without transcribing 35 ids by hand and risking a typo that silently runs
+    one configuration short.
+    """
+    if not spec:
+        return None
+    if not spec.startswith("@"):
+        return {part.strip() for part in spec.split(",") if part.strip()}
+
+    ids: set[str] = set()
+    for line in Path(spec[1:]).read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        first = line.split(",")[0].strip()
+        if first == "cfg_id":  # the CSV header of an override file
+            continue
+        if first:
+            ids.add(first)
+    return ids
+
+
+def select_runs(runs: list[dict], spec: str | None) -> list[dict]:
+    """Manifest rows named by ``spec``, or all of them when it is unset.
+
+    An id that names no run raises rather than dropping out: a typo would
+    otherwise shrink the batch and report success with fewer runs than asked
+    for, which is indistinguishable from a job that simply finished early.
+    """
+    ids = parse_only_cfg(spec)
+    if ids is None:
+        return runs
+    kept = [r for r in runs if r.get("cfg_id") in ids]
+    unknown = sorted(ids - {r.get("cfg_id") for r in kept})
+    if unknown:
+        raise SystemExit(f"--only-cfg: not in the manifest: {', '.join(unknown)}")
+    if not kept:
+        raise SystemExit("--only-cfg matched no runs")
+    return kept
+
+
 def run_complete(code: str, run_dir: Path) -> bool:
     """A run is complete when its final cross section was printed."""
     out = run_dir / "out.txt"
@@ -414,18 +459,42 @@ def warmup_cache(args, runs: list[dict], root: Path, repo: Path, gpus: int) -> i
     return 0
 
 
-def run_all(args, runs: list[dict], root: Path, repo: Path) -> int:
-    gpus = args.gpus
-    workers = args.jobs or (gpus if gpus else os.cpu_count() or 1)
-    pending = [r for r in runs if not run_complete(args.code, root / args.code / r["run_id"])]
+def select_pending(args, runs: list[dict], root: Path) -> tuple[list[dict], bool]:
+    """Runs this invocation owes, and whether completeness was deliberately ignored.
+
+    Selecting configurations explicitly means re-running them.  Every run in
+    this scan has printed a cross section -- including the ones whose 32-bit
+    counter wrapped and returned a negative one -- so ``run_complete()`` is true
+    for all of them, and a filtered batch that honoured it would print "0 to
+    run" and exit 0 having done nothing.
+    """
+    rerun = bool(args.only_cfg)
+    pending = [
+        r
+        for r in runs
+        if rerun or not run_complete(args.code, root / args.code / r["run_id"])
+    ]
     if args.limit:
         # Smoke-test aid: run only the first N pending runs, so a short debug job
         # exercises the real launch path instead of the whole 192-run grid.
         pending = pending[: args.limit]
-    print(
-        f"{args.code}: {len(runs) - len(pending)}/{len(runs)} complete already, "
-        f"{len(pending)} to run, {workers} workers"
-    )
+    return pending, rerun
+
+
+def run_all(args, runs: list[dict], root: Path, repo: Path) -> int:
+    gpus = args.gpus
+    workers = args.jobs or (gpus if gpus else os.cpu_count() or 1)
+    pending, rerun = select_pending(args, runs, root)
+    if rerun:
+        print(
+            f"{args.code}: {len(pending)} selected run(s) to re-run "
+            f"(completeness ignored), {workers} workers"
+        )
+    else:
+        print(
+            f"{args.code}: {len(runs) - len(pending)}/{len(runs)} complete already, "
+            f"{len(pending)} to run, {workers} workers"
+        )
 
     if args.dry_run:
         for run in pending[:3]:
@@ -588,12 +657,21 @@ def main() -> int:
         help="run at most this many of the pending runs, 0 for all of them; a "
         "smoke-test aid so a short debug job exercises the real launch path",
     )
+    p.add_argument(
+        "--only-cfg",
+        default=None,
+        help="restrict the batch to these configurations: a comma-separated list "
+        "of cfg_ids, or @path naming a file with one per line or a cfg_id CSV "
+        "column (a comment or blank line is skipped).  Used to re-run just the "
+        "configurations whose reference had to be rebuilt, without paying for "
+        "the 157 that were already sound.",
+    )
     p.add_argument("--dry-run", action="store_true")
     args = p.parse_args()
 
     root = args.root or default_root()
     repo = args.repo or Path(__file__).resolve().parent.parent.parent
-    runs = load_manifest(root)
+    runs = select_runs(load_manifest(root), args.only_cfg)
 
     if args.check_collisions:
         return check_collisions(runs, root, repo)

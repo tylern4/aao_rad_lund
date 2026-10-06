@@ -279,6 +279,7 @@ def test_run_all_actually_staggers_before_launching(tmp_path, monkeypatch):
         python=sys.executable,
         warmup_events=0,
         limit=0,
+        only_cfg=None,
     )
     runs = [
         {"run_id": "cfg_000_s0", "cfg_id": "cfg_000", "seed": "1"},
@@ -426,6 +427,7 @@ def _warm_args(**kw):
         python=sys.executable,
         warmup_events=2000,
         limit=0,
+        only_cfg=None,
     )
     base.update(kw)
     return argparse.Namespace(**base)
@@ -573,6 +575,7 @@ def _concurrency_args(code, jobs, gpus=0):
         python=sys.executable,
         warmup_events=0,
         limit=0,
+        only_cfg=None,
     )
 
 
