@@ -370,6 +370,9 @@ def main(argv: list[str] | None = None) -> int:
         summary["runs"] = [
             {k: rec.get(k) for k in _JSON_FIELDS} for rec in recs
         ]
+        # Own directory, so a report written straight to a not-yet-created
+        # timing/ is not lost to the last line of an otherwise finished job.
+        args.json.parent.mkdir(parents=True, exist_ok=True)
         args.json.write_text(json.dumps(summary, indent=2) + "\n")
     return 0
 

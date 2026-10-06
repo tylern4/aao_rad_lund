@@ -116,6 +116,7 @@ rc=0
 # Report even when the driver failed or the wall limit cut the job short: runs
 # that finished carry their own timing.json, and a partial answer beats an
 # empty log.
+mkdir -p "$ROOT/timing"
 PROBE_JSON="$ROOT/timing/pack128.json"
 REF_JSON="$ROOT/timing/bench8.json"
 "$PY" "$HERE/bench_report.py" --label "fortran, 192 runs at one per core" \
@@ -126,57 +127,9 @@ REF_JSON="$ROOT/timing/bench8.json"
 "$PY" "$HERE/bench_report.py" --label "reference, 8 runs on the same node type" \
   --concurrency 128 --json "$REF_JSON" "$ROOT/reduced/fortran" || true
 
-"$PY" - "$PROBE_JSON" "$REF_JSON" <<'PY'
-import json
-import statistics
-import sys
-from pathlib import Path
-
-probe_p, ref_p = (Path(p) for p in sys.argv[1:3])
-if not probe_p.is_file() or not ref_p.is_file():
-    print("\n== packing penalty: no summary to compare")
-    raise SystemExit(0)
-probe = json.loads(probe_p.read_text())
-ref = json.loads(ref_p.read_text())
-
-
-def by_config(summary):
-    """Median projected 20,000-event wall per configuration."""
-    runs = {}
-    for rec in summary.get("runs", []):
-        if rec.get("complete") and rec.get("proj"):
-            cfg = rec["run_id"].rsplit("_s", 1)[0]
-            runs.setdefault(cfg, []).append(rec["proj"])
-    return {cfg: statistics.median(v) for cfg, v in runs.items()}
-
-
-# Compared per configuration, not as two medians: the probe covers all 96 and
-# the reference the four bench_fortran timed, so a ratio of the two medians
-# would carry the difference in which configurations are in each set -- and
-# trials per event span 400x across the grid -- as if it were packing.
-p, r = by_config(probe), by_config(ref)
-shared = sorted(set(p) & set(r))
-print("\n== packing penalty, same configurations on the same node type")
-print(f"  {len(p)} configurations at one run per core, "
-      f"{len(r)} in the reference, {len(shared)} shared")
-ratios = []
-for cfg in shared:
-    ratios.append(p[cfg] / r[cfg])
-    print(f"    {cfg}: {r[cfg]:8.0f} s -> {p[cfg]:8.0f} s   x{p[cfg] / r[cfg]:.2f}")
-if ratios:
-    print(f"  median {statistics.median(ratios):.2f} x   "
-          f"(1.00 = packing a node costs nothing)")
-
-print("\n== node-hours per run, 20,000 events, one run per physical core")
-nh = probe.get("node_hours")
-if nh:
-    print(f"  measured over all {len(p)} configurations: {nh:.6f}   "
-          f"192-run grid: {nh * 192:.2f} node-h")
-ref_nh = ref.get("node_hours")
-if ref_nh:
-    print(f"  uncontended, the {len(r)} configurations the bench timed: "
-          f"{ref_nh:.6f}  (extrapolated to 128 in flight)")
-PY
+# Runs bare, not with || true: the tables above are already in the log, and a
+# missing summary means bench_report did not finish, which should fail the job.
+"$PY" "$HERE/packing_penalty.py" "$PROBE_JSON" "$REF_JSON"
 
 echo
 echo "== elapsed for the job: $SECONDS s"
