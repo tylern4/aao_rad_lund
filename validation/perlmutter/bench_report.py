@@ -310,6 +310,12 @@ def report(label: str, recs: list[dict], concurrency: int = 1,
     return summary
 
 
+_JSON_FIELDS = (
+    "run_id", "kind", "complete", "wall", "wall_source", "loop", "startup",
+    "events", "trials", "rate", "proj",
+)
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -356,6 +362,14 @@ def main(argv: list[str] | None = None) -> int:
     recs = [derive(read_run(path), args.target_events) for path in paths]
     summary = report(args.label or str(args.dir), recs, args.concurrency, args.grid)
     if args.json is not None:
+        # The per-run projections too, not just the medians.  Comparing two
+        # arms of different breadth -- all 96 configurations against the four
+        # bench_fortran timed -- has to be done configuration by configuration,
+        # because trials per event span 400x across the grid and two medians
+        # taken over different sets differ for that reason alone.
+        summary["runs"] = [
+            {k: rec.get(k) for k in _JSON_FIELDS} for rec in recs
+        ]
         args.json.write_text(json.dumps(summary, indent=2) + "\n")
     return 0
 

@@ -302,6 +302,25 @@ def test_main_can_write_its_summary_as_json(tmp_path: Path):
     assert summary["filesystem_timed"] == 0
 
 
+def test_json_carries_each_run_so_arms_can_be_matched_by_configuration(tmp_path: Path):
+    """The probe times all 96 configurations and the reference times four.  Two
+    medians taken over different sets differ because of which configurations
+    are in them -- trials per event span 400x across the grid -- so the ratio
+    has to be built per configuration, which needs the runs in the file."""
+    for run_id in ("cfg_000_s0", "cfg_034_s1"):
+        out = write(tmp_path / "runs" / run_id / "out.txt", PORT_SUMMARY)
+        write_timing(out.parent, wall=12.0)
+    dump = tmp_path / "summary.json"
+    assert br.main([str(tmp_path / "runs"), "--json", str(dump)]) == 0
+
+    runs = json.loads(dump.read_text())["runs"]
+    assert sorted(r["run_id"] for r in runs) == ["cfg_000_s0", "cfg_034_s1"]
+    assert all(r["proj"] for r in runs)
+    # The keys the comparison needs, and nothing that would bloat the file.
+    assert set(runs[0]) <= set(br._JSON_FIELDS)
+    assert "text" not in runs[0] and "out" not in runs[0]
+
+
 def test_main_without_json_flag_leaves_no_file(tmp_path: Path, capsys):
     write(tmp_path / "runs" / "cfg_000_s0" / "out.txt", PORT_SUMMARY)
     assert br.main([str(tmp_path / "runs")]) == 0

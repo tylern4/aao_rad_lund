@@ -52,6 +52,15 @@ TRIALS_PER_SECOND = 234_000
 # percent rather than a rounding error.
 TARGET_SECONDS = 20.0
 
+# Floor on the quota.  ``nprint = nmax / 25`` (src/aao_rad.f90:359) is the print
+# interval, and ``ntell = nevent / nprint`` (src/aao_rad.f90:1186) divides by
+# it every event, so a quota below 25 gives nprint = 0 and the binary dies of
+# SIGFPE on the first event.  The floor is not hypothetical: cfg_088 costs
+# 507,506 trials per event, whose 20-second quota rounds to 9.  At 25 events
+# that configuration runs ~54 s instead of ~20 s, which is cheap next to a job
+# that measures nothing because its most expensive run crashed.
+MIN_EVENTS = 25
+
 
 def trials_per_event(text: str) -> float | None:
     """Trials per event from one ``out.txt``, or None if it says nothing usable.
@@ -78,14 +87,20 @@ def trials_per_event(text: str) -> float | None:
 def event_quota(tpe: float, target: float = TARGET_SECONDS, rate: int = TRIALS_PER_SECOND) -> int:
     """Events that buy *target* seconds of uncontended work at *tpe* trials/event.
 
-    Clamped at both ends: a configuration expensive enough to need fewer than
-    one event still has to produce one, and a cheap one -- trials per event near
-    unity -- would otherwise ask for millions, which :func:`make_grid.load_overrides`
-    rejects as *above* the standard quota and takes the whole probe down before
-    it measures anything.  Sharing make_grid's constant rather than repeating
-    20,000 keeps the two from drifting the way the run card and manifest did.
+    Clamped at both ends.  Above: a configuration expensive enough to need
+    fewer than one event still has to produce one, and a cheap one -- trials per
+    event near unity -- would otherwise ask for millions, which
+    :func:`make_grid.load_overrides` rejects as *above* the standard quota and
+    takes the whole probe down before it measures anything.  Sharing
+    make_grid's constant rather than repeating 20,000 keeps the two from
+    drifting the way the run card and manifest did.
+
+    Below: :data:`MIN_EVENTS`, which the arithmetic can go under -- 20 seconds
+    of cfg_088 is 9 events, and 9 events never reaches the clock because
+    ``nprint = 9 / 25 = 0`` divides into on the first event.  This is the one
+    place the probe's budget yields to the binary's.
     """
-    return min(make_grid.N_EVENTS, max(1, round(target * rate / tpe)))
+    return min(make_grid.N_EVENTS, max(MIN_EVENTS, round(target * rate / tpe)))
 
 
 def scan_rates(scan: Path) -> dict[str, float]:

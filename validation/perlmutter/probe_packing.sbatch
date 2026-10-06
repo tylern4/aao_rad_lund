@@ -78,7 +78,6 @@ PY=${AAO_PYTHON:-${AAO_VENV:-$SCRATCH/aao_venv}/bin/python}
 # Python block-buffers stdout when it is not a terminal, and every one of these
 # jobs can be stopped at its wall limit -- unbuffer so the log keeps them.
 export PYTHONUNBUFFERED=1
-mkdir -p "$ROOT/logs"
 
 if [ ! -x "$PY" ]; then
   echo "venv python not found at $PY -- run submit_all.sh first" >&2
@@ -117,7 +116,6 @@ rc=0
 # Report even when the driver failed or the wall limit cut the job short: runs
 # that finished carry their own timing.json, and a partial answer beats an
 # empty log.
-mkdir -p "$ROOT/timing"
 PROBE_JSON="$ROOT/timing/pack128.json"
 REF_JSON="$ROOT/timing/bench8.json"
 "$PY" "$HERE/bench_report.py" --label "fortran, 192 runs at one per core" \
@@ -130,6 +128,7 @@ REF_JSON="$ROOT/timing/bench8.json"
 
 "$PY" - "$PROBE_JSON" "$REF_JSON" <<'PY'
 import json
+import statistics
 import sys
 from pathlib import Path
 
@@ -137,19 +136,46 @@ probe_p, ref_p = (Path(p) for p in sys.argv[1:3])
 if not probe_p.is_file() or not ref_p.is_file():
     print("\n== packing penalty: no summary to compare")
     raise SystemExit(0)
-probe, ref = json.loads(probe_p.read_text()), json.loads(ref_p.read_text())
-print("\n== packing penalty (median wall projected to 20,000 events)")
-for tag, s in (("8 runs, uncontended", ref), ("192 runs, one per core", probe)):
-    proj = s.get("median_proj")
-    print(f"  {tag:<24} {proj:.0f} s" if proj else f"  {tag:<24} n/a")
-a, b = ref.get("median_proj"), probe.get("median_proj")
-if a and b:
-    print(f"  ratio {b / a:.2f} x   (1.0 means packing a node costs nothing)")
-for tag, s in (("one per core (128)", ref), ("this layout (128)", probe)):
-    nh = s.get("node_hours")
-    print(f"  node-h per run, {tag:<20} {nh:.6f}" if nh else f"  node-h per run, {tag:<20} n/a")
-if (nh := probe.get("node_hours")):
-    print(f"  extrapolated 192-run grid at this rate: {nh * 192:.2f} node-h")
+probe = json.loads(probe_p.read_text())
+ref = json.loads(ref_p.read_text())
+
+
+def by_config(summary):
+    """Median projected 20,000-event wall per configuration."""
+    runs = {}
+    for rec in summary.get("runs", []):
+        if rec.get("complete") and rec.get("proj"):
+            cfg = rec["run_id"].rsplit("_s", 1)[0]
+            runs.setdefault(cfg, []).append(rec["proj"])
+    return {cfg: statistics.median(v) for cfg, v in runs.items()}
+
+
+# Compared per configuration, not as two medians: the probe covers all 96 and
+# the reference the four bench_fortran timed, so a ratio of the two medians
+# would carry the difference in which configurations are in each set -- and
+# trials per event span 400x across the grid -- as if it were packing.
+p, r = by_config(probe), by_config(ref)
+shared = sorted(set(p) & set(r))
+print("\n== packing penalty, same configurations on the same node type")
+print(f"  {len(p)} configurations at one run per core, "
+      f"{len(r)} in the reference, {len(shared)} shared")
+ratios = []
+for cfg in shared:
+    ratios.append(p[cfg] / r[cfg])
+    print(f"    {cfg}: {r[cfg]:8.0f} s -> {p[cfg]:8.0f} s   x{p[cfg] / r[cfg]:.2f}")
+if ratios:
+    print(f"  median {statistics.median(ratios):.2f} x   "
+          f"(1.00 = packing a node costs nothing)")
+
+print("\n== node-hours per run, 20,000 events, one run per physical core")
+nh = probe.get("node_hours")
+if nh:
+    print(f"  measured over all {len(p)} configurations: {nh:.6f}   "
+          f"192-run grid: {nh * 192:.2f} node-h")
+ref_nh = ref.get("node_hours")
+if ref_nh:
+    print(f"  uncontended, the {len(r)} configurations the bench timed: "
+          f"{ref_nh:.6f}  (extrapolated to 128 in flight)")
 PY
 
 echo

@@ -91,7 +91,26 @@ def test_the_quota_buys_the_target_seconds_of_work():
 
 def test_the_quota_is_always_a_reduction_of_the_standard_quota():
     for tpe in (1.0, 100.0, 16_181.0, 3e5, 1e9):
-        assert 1 <= q.event_quota(tpe) <= make_grid.N_EVENTS
+        assert q.MIN_EVENTS <= q.event_quota(tpe) <= make_grid.N_EVENTS
+
+
+def test_the_arithmetic_never_reaches_a_quota_the_fortran_would_divide_by():
+    """``nprint = nmax / 25`` (src/aao_rad.f90:359) is the print interval and
+    ``ntell = nevent / nprint`` (src/aao_rad.f90:1186) divides by it every
+    event, so a quota under 25 is a SIGFPE on the first event -- before a single
+    event is timed.
+
+    cfg_088's production trials per event, 507,506, is exactly the case: 20 s
+    of it is 9 events.  Both seeds are priced here because the quota is a
+    per-configuration median, and cfg_088's seeds disagree by 10x (one wraps
+    ``integer*4`` by event 2,400).
+    """
+    assert round(q.TARGET_SECONDS * q.TRIALS_PER_SECOND / 507_506) == 9  # unwalled
+    assert q.event_quota(507_506) == q.MIN_EVENTS
+    assert q.event_quota(979_137) == q.MIN_EVENTS
+
+    for tpe in (1.0, 1e5, 507_506, 979_137, 1e9):
+        assert q.event_quota(tpe) // 25 >= 1, f"nprint would be 0 at tpe={tpe}"
 
 
 def test_an_expensive_configuration_gets_fewer_events_than_a_cheap_one():
@@ -115,7 +134,7 @@ def test_write_quotas_covers_every_configuration(tmp_path: Path):
 
     rows = list(csv.DictReader(open(out, newline="")))
     assert len(rows) == 96
-    assert all(1 <= int(r["n_events"]) <= make_grid.N_EVENTS for r in rows)
+    assert all(q.MIN_EVENTS <= int(r["n_events"]) <= make_grid.N_EVENTS for r in rows)
     # What make_grid will actually load from this file.
     assert make_grid.load_overrides(out)["cfg_000"] == 289
 
