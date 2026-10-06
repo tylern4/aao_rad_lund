@@ -26,13 +26,22 @@
 # quota exists at which both arms run long enough to time directly -- that is
 # the speedup.
 
-#SBATCH --qos=gpu_debug
+#SBATCH --qos=debug
 #SBATCH --job-name=aao_bench_gpu
 #SBATCH --account=m3792
 #SBATCH --output=/pscratch/sd/t/tylern/aao_rad_scan/logs/aao_bench_gpu_%j.out
 # Slurm does not expand $SCRATCH in --output, which is read at submit time, so
 # the path is spelled out.  Not $HOME (74% full) and not /tmp (not shared with
 # the compute nodes).
+#
+# `debug`, not `gpu_debug`.  A `gpu_debug` QoS exists and sacctmgr reports its
+# MaxWall as 00:30:00, but every request against it is refused outright --
+# `sbatch --test-only` comes back with "Job request does not match any supported
+# policy" for all of gres=gpu:1 and gres=gpu:4, with and without
+# --constraint=gpu, with and without --exclusive, and for the bare QoS on its
+# own.  `debug` accepts the same request unchanged, so the GPU arm runs there.
+# `gpu_interactive` and `gpu_regular` refuse it too; `regular` accepts it but
+# its predicted start was six days out.
 #SBATCH --constraint=gpu
 #SBATCH --gpus=4
 #SBATCH --exclusive
